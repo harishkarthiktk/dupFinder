@@ -61,7 +61,7 @@ Size categories include:
 - 50-500MB
 - 500MB-1GB
 - 1-2GB
-- > 2GB
+- above 2GB
 
 ## Database Schema
 
