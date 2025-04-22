@@ -1,6 +1,13 @@
-# File Hash Scanner
+# File Hash Scanner and Duplicate Finder
 
 A tool for recursively scanning directories, calculating file hashes, storing the results in a SQLite database, and generating interactive HTML reports.
+
+The purpose of the program is find duplicates; but the code is written in 2 major segments.
+1) A hash scanner, that creates a sqlite db and html of the scanned folder.
+2) An analyzer that reads the created sqlite db to find patterns of duplicates using the hashes generated.
+
+(1) has been completed and tested to work in Windows, Linux and MacOS.
+(2) development is in progress and the functionalities will be added natively soon; until then the generated html can be used to find duplicates and take actions.
 
 ## Features
 
@@ -15,12 +22,13 @@ A tool for recursively scanning directories, calculating file hashes, storing th
 
 ## Installation
 
-No external dependencies are required! Just Python 3.6+ with standard libraries.
+Just Python 3.6+ with a few non standard libraries.
 
 ```bash
-git clone https://github.com/yourusername/file-hash-scanner.git
-cd file-hash-scanner
+git clone https://github.com/harishkarthiktk/dupFinder.git
+cd dupFinder
 chmod +x main.py  # Make it executable (Unix/Linux/Mac)
+pip install -r requirements.txt # Install the required libraries.
 ```
 
 ## Usage
@@ -73,6 +81,17 @@ The SQLite database contains a single table `file_hashes` with the following col
 - `hash_value`: File hash as hexadecimal string
 - `file_size`: File size in bytes
 - `scan_date`: Scan timestamp
+
+
+## Footnotes
+
+Since the purpose of the program is to act as a CLI program, a major GUI is not in plan.
+However, small elements for ease of use could be added down the line.
+
+The HTML file generated could be large for browsers to handle without issues, and the table-data might cause browser slow down as well.
+A workaround for that would be to directly query the sqlitedb created and get outputs.
+
+Simple analysis queries will be added soon as an utility, and dedicated analysis system (2) is the primary work in progress.
 
 ## License
 
