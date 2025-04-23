@@ -1,7 +1,8 @@
 # Operation temp files
-Code/*.html
-Code/file_hashes.db
 **/venv/
+**/env/
+**/outputs
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
