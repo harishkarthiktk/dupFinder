@@ -6,8 +6,8 @@ The purpose of the program is find duplicates; but the code is written in 2 majo
 1) A hash scanner, that creates a sqlite db and html of the scanned folder.
 2) An analyzer that reads the created sqlite db to find patterns of duplicates using the hashes generated.
 
-(1) has been completed and tested to work in Windows, Linux and MacOS.
-(2) development is in progress and the functionalities will be added natively soon; until then the generated html can be used to find duplicates and take actions.
+> (1) has been completed and tested to work in Windows, Linux and MacOS.
+> (2) development is in progress and the functionalities will be added natively soon; until then the generated html can be used to find duplicates and take actions.
 
 ## Features
 
