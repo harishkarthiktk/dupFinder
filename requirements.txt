@@ -2,3 +2,4 @@ exit
 colorama==0.4.6
 tqdm==4.67.1
 typing==3.7.4.3
+SQLAlchemy==2.0.40
