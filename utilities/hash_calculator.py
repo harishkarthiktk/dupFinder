@@ -88,3 +88,13 @@ def calculate_directory_hashes(directory: str, algorithm: str = "sha256") -> Lis
         print(f"Error accessing directory {directory}: {e}", file=sys.stderr)
 
     return result
+
+if __name__ == "__main__":
+    try:
+        hashes = calculate_directory_hashes(sys.argv[1])
+        with open (r'../outputs/directory_hashes.txt', 'w') as wfile:
+            for hash in hashes:
+                wfile.write("filename, file_path, hash_value, file_size" + "\n")
+                wfile.writelines(f'"{hash[0]}, "{hash[1]}", "{hash[2]}", "{hash[3]}"')
+    except Exception as e:
+        print(f'Exception encountered: {str(e)}')
