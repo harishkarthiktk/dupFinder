@@ -35,7 +35,7 @@ pip install -r requirements.txt # Install the required libraries.
 ## Usage
 
 ```bash
-# Basic usage
+# Basic usage (single-threaded)
 python main.py /path/to/scan
 
 # Specify hash algorithm
@@ -43,14 +43,30 @@ python main.py /path/to/scan -a md5
 
 # Specify database and report paths
 python main.py /path/to/scan -d my_hashes.db -r my_report.html
+
+# Optimized usage (multiprocessing, recommended for large directories)
+python main_mul.py /path/to/scan -p 4
+
+# With custom options for multiprocessing
+python main_mul.py /path/to/scan -a md5 -d ./outputs/file_hashes.db -r ./outputs/hash_report.html -p 8 -c 8MB -b 2000
 ```
 
-### Command Line Arguments
+### Command Line Arguments (main.py)
 
 - `path`: Directory or file to scan (required)
 - `-a, --algorithm`: Hash algorithm to use (default: sha256)
-- `-d, --database`: SQLite database file path (default: file_hashes.db)
-- `-r, --report`: HTML report file path (default: hash_report.html)
+- `-d, --database`: SQLite database file path (default: ./outputs/file_hashes.db)
+- `-r, --report`: HTML report file path (default: ./outputs/hash_report.html)
+
+### Advanced Command Line Arguments (main_mul.py)
+
+- `path`: Directory or file to scan (required)
+- `-a, --algorithm`: Hash algorithm to use (default: sha256)
+- `-d, --database`: SQLite database file path (default: ./outputs/file_hashes.db)
+- `-r, --report`: HTML report file path (default: ./outputs/hash_report.html)
+- `-p, --processes`: Number of processes to use (default: number of CPU cores)
+- `-c, --chunk-size`: Read buffer chunk size in bytes (default: 4MB)
+- `-b, --batch-size`: Number of files to process before database commit (default: 1000)
 
 ## HTML Report
 
