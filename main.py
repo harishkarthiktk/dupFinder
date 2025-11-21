@@ -15,8 +15,11 @@ from tqdm import tqdm
 
 # Custom Module Imports
 from utilities.hash_calculator import calculate_file_hash, get_file_size
-from utilities.database import initialize_database, upsert_files, get_pending_files, update_file_hash
+from utilities.database import initialize_database, upsert_files, get_pending_files, update_file_hash, update_file_hash_batch
 from utilities.html_generator import generate_html_report
+
+
+BATCH_SIZE = 1000  # Number of files to process before database commit
 
 
 def main():
@@ -99,14 +102,25 @@ def main():
             processing_start = time.time()
             
             with tqdm(total=len(pending_files), desc="Hashing files") as pbar:
+                current_batch = []
                 for file_id, file_path in pending_files:
                     try:
                         hash_value = calculate_file_hash(file_path, args.algorithm)
-                        update_file_hash(conn, file_id, hash_value)
+                        current_batch.append((file_id, hash_value))
                     except Exception as e:
                         print(f"Error processing {file_path}: {e}")
                         # Optionally mark as error in DB? For now just skip.
+                    
                     pbar.update(1)
+                    
+                    # If batch is full, write to DB
+                    if len(current_batch) >= BATCH_SIZE:
+                        update_file_hash_batch(conn, current_batch)
+                        current_batch = []
+                
+                # Write remaining
+                if current_batch:
+                    update_file_hash_batch(conn, current_batch)
             
             print(f"Processing completed in {time.time() - processing_start:.2f} seconds")
 
