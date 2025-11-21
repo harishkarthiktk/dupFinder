@@ -8,7 +8,7 @@ import os
 from typing import List, Tuple, Optional, Dict, Any
 from contextlib import contextmanager
 import sqlite3
-from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Table, MetaData, select, insert, inspect
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Table, MetaData, select, insert, inspect, case
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
@@ -47,35 +47,10 @@ Base = declarative_base()
 engine = None
 SessionFactory = None
 
-# Define the file_hashes table
-class FileHash(Base):
-    __tablename__ = 'file_hashes'
-    
-    id = Column(Integer, primary_key=True)
-    filename = Column(String, nullable=False)
-    absolute_path = Column(String, nullable=False, unique=True)
-    hash_value = Column(String, nullable=False)
-    file_size = Column(BigInteger, nullable=False)
-    scan_date = Column(String, nullable=False)
-
-def get_connection_string(db_path: str) -> str:
-    """Get the appropriate connection string based on DB_CONFIG."""
-    db_type = DB_CONFIG["type"]
-    
-    if db_type == "sqlite":
-        return f"sqlite:///{db_path}"
-    elif db_type == "mysql":
-        params = DB_CONFIG["connection_params"]["mysql"]
-        return f"mysql+pymysql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{params['database']}"
-    elif db_type == "postgresql":
-        params = DB_CONFIG["connection_params"]["postgresql"]
-        return f"postgresql://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{params['database']}"
-    else:
-        raise ValueError(f"Unsupported database type: {db_type}")
 
 def initialize_database(db_path: str) -> sqlite3.Connection:
     """
-    Create or connect to the SQLite database and set up the schema.
+    Initialize the database connection and create tables.
     
     Args:
         db_path: Path to the SQLite database file
@@ -85,64 +60,51 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
     """
     global engine, SessionFactory
     
-    # Create directory if it doesn't exist
+    # Ensure directory exists
     db_dir = os.path.dirname(db_path)
     if db_dir and not os.path.exists(db_dir):
         os.makedirs(db_dir)
-    
+        
     # Create SQLAlchemy engine
-    connection_string = get_connection_string(db_path)
+    # Use 4 slashes for absolute path on Windows, 3 for relative
+    if os.name == 'nt':
+        db_url = f"sqlite:///{os.path.abspath(db_path)}"
+    else:
+        db_url = f"sqlite:///{os.path.abspath(db_path)}"
+        
+    engine = create_engine(db_url, **DB_CONFIG["connection_params"]["sqlite"])
     
-    # Get connection parameters based on database type
-    db_type = DB_CONFIG["type"]
-    connect_args = DB_CONFIG["connection_params"].get(db_type, {}).get("connect_args", {})
+    # Create tables
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('filename', String, nullable=False),
+                 Column('absolute_path', String, nullable=False, unique=True),
+                 Column('hash_value', String, nullable=True),
+                 Column('file_size', BigInteger, nullable=False),
+                 Column('scan_date', String, nullable=False))
     
-    engine = create_engine(
-        connection_string,
-        echo=DB_CONFIG["connection_params"][db_type].get("echo", False),
-        poolclass=QueuePool,
-        pool_size=DB_CONFIG["connection_params"][db_type].get("pool_size", 5),
-        max_overflow=DB_CONFIG["connection_params"][db_type].get("max_overflow", 10),
-        pool_timeout=DB_CONFIG["connection_params"][db_type].get("pool_timeout", 30),
-        pool_recycle=DB_CONFIG["connection_params"][db_type].get("pool_recycle", 1800),
-        connect_args=connect_args
-    )
+    metadata.create_all(engine)
     
-    # Create tables if they don't exist
-    Base.metadata.create_all(engine)
-    
-    # Create session factory
     SessionFactory = scoped_session(sessionmaker(bind=engine))
     
-    # For backward compatibility, return a SQLite connection
-    if db_type == "sqlite":
-        # Apply SQLite optimizations
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA cache_size = -10000")  # ~10MB cache
-        conn.execute("PRAGMA temp_store = MEMORY")
-        conn.commit()
-        return conn
-    else:
-        # Create a dummy sqlite connection for API compatibility
-        # This is just to maintain the interface, but won't be used for actual operations
-        return sqlite3.connect(":memory:")
+    # Return raw sqlite connection for backward compatibility if needed
+    # But prefer using engine
+    return sqlite3.connect(db_path)
+
 
 def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     """
-    Save file data to the database using SQLAlchemy's bulk operations.
+    Save file data to database (Legacy function, use upsert_files instead).
     
     Args:
-        conn: SQLite connection object (ignored, kept for backward compatibility)
-        file_data: List of tuples containing (filename, absolute_path, hash_value, file_size, scan_date)
+        conn: SQLite connection object
+        file_data: List of tuples (filename, absolute_path, hash_value, file_size, scan_date)
     """
     global engine
-    
     if not engine:
-        raise RuntimeError("Database not initialized. Call initialize_database first.")
-    
-    # Convert file_data to list of dicts for SQLAlchemy
+        raise RuntimeError("Database not initialized")
+
     data_dicts = [
         {
             'filename': item[0],
@@ -154,59 +116,27 @@ def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
         for item in file_data
     ]
     
-    # Use the most efficient method based on database type
-    db_type = DB_CONFIG["type"]
-    
-    if db_type == "sqlite":
-        # Use SQLAlchemy Core for bulk insertion (faster than ORM for bulk operations)
-        metadata = MetaData()
-        table = Table('file_hashes', metadata,
-                     Column('id', Integer, primary_key=True),
-                     Column('filename', String, nullable=False),
-                     Column('absolute_path', String, nullable=False, unique=True),
-                     Column('hash_value', String, nullable=False),
-                     Column('file_size', BigInteger, nullable=False),
-                     Column('scan_date', String, nullable=False))
-        
-        # SQLite-specific upsert
-        with engine.begin() as connection:
-            for chunk in _chunk_data(data_dicts, 1000):  # Process in chunks for better memory usage
-                stmt = sqlite_insert(table).values(chunk)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=['absolute_path'],
-                    set_={
-                        'filename': stmt.excluded.filename,
-                        'hash_value': stmt.excluded.hash_value,
-                        'file_size': stmt.excluded.file_size,
-                        'scan_date': stmt.excluded.scan_date
-                    }
-                )
-                connection.execute(stmt)
-    else:
-        # Generic approach for other database types
-        with engine.begin() as connection:
-            for chunk in _chunk_data(data_dicts, 1000):
-                metadata = MetaData()
-                table = Table('file_hashes', metadata,
-                             Column('id', Integer, primary_key=True),
-                             Column('filename', String, nullable=False),
-                             Column('absolute_path', String, nullable=False, unique=True),
-                             Column('hash_value', String, nullable=False),
-                             Column('file_size', BigInteger, nullable=False),
-                             Column('scan_date', String, nullable=False))
-                
-                for item in chunk:
-                    # First try to insert
-                    try:
-                        stmt = insert(table).values(**item)
-                        connection.execute(stmt)
-                    except:
-                        # If insert fails (due to unique constraint), then update
-                        connection.execute(
-                            table.update()
-                            .where(table.c.absolute_path == item['absolute_path'])
-                            .values(**item)
-                        )
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('filename', String),
+                 Column('absolute_path', String, unique=True),
+                 Column('hash_value', String),
+                 Column('file_size', BigInteger),
+                 Column('scan_date', String))
+
+    with engine.begin() as connection:
+        for chunk in _chunk_data(data_dicts, 1000):
+            # Use INSERT OR REPLACE logic
+            for item in chunk:
+                try:
+                    stmt = insert(table).values(**item)
+                    connection.execute(stmt)
+                except:
+                    # Update existing
+                    stmt = table.update().where(table.c.absolute_path == item['absolute_path']).values(**item)
+                    connection.execute(stmt)
+
 
 def get_all_records(conn: sqlite3.Connection) -> List[Tuple]:
     """
@@ -266,3 +196,122 @@ def get_session():
         raise
     finally:
         session.close()
+
+def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
+    """
+    Insert new files or update existing ones. 
+    If a file exists but size/mtime changed, reset hash to NULL.
+    
+    Args:
+        conn: SQLite connection object (ignored)
+        file_data: List of tuples (filename, absolute_path, file_size, scan_date)
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+
+    # Get existing files to decide what to do
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('filename', String),
+                 Column('absolute_path', String, unique=True),
+                 Column('hash_value', String, nullable=True),
+                 Column('file_size', BigInteger),
+                 Column('scan_date', String))
+
+    # Extract paths to query
+    paths = [item[1] for item in file_data]
+    
+    existing_files = {}
+    with engine.connect() as connection:
+        # Query in chunks to avoid too many variables
+        for chunk_paths in _chunk_data(paths, 900): # SQLite limit is around 999 variables
+            query = select(table.c.absolute_path, table.c.file_size).where(table.c.absolute_path.in_(chunk_paths))
+            result = connection.execute(query)
+            for row in result:
+                existing_files[row.absolute_path] = row.file_size
+
+    inserts = []
+    updates = []
+
+    for item in file_data:
+        filename, absolute_path, file_size, scan_date = item
+        
+        if absolute_path not in existing_files:
+            # New file
+            inserts.append({
+                'filename': filename,
+                'absolute_path': absolute_path,
+                'file_size': file_size,
+                'scan_date': scan_date,
+                'hash_value': ''
+            })
+        elif existing_files[absolute_path] != file_size:
+            # Changed file (size mismatch) -> Update metadata and reset hash
+            updates.append({
+                'filename': filename,
+                'absolute_path': absolute_path,
+                'file_size': file_size,
+                'scan_date': scan_date,
+                'hash_value': ''
+            })
+        # Else: Unchanged file -> Do nothing
+
+    with engine.begin() as connection:
+        if inserts:
+            connection.execute(insert(table), inserts)
+        if updates:
+            for update_item in updates:
+                stmt = table.update().where(table.c.absolute_path == update_item['absolute_path']).values(**update_item)
+                connection.execute(stmt)
+
+def get_pending_files(conn: sqlite3.Connection) -> List[Tuple]:
+    """Get all files that have no hash (hash_value IS NULL)."""
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+        
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('absolute_path', String),
+                 Column('hash_value', String))
+                 
+    with engine.connect() as connection:
+        query = select(table.c.id, table.c.absolute_path).where((table.c.hash_value == '') | (table.c.hash_value == None))
+        result = connection.execute(query)
+        return [(row.id, row.absolute_path) for row in result]
+
+def update_file_hash(conn: sqlite3.Connection, file_id: int, hash_value: str) -> None:
+    """Update the hash for a specific file ID."""
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+        
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('hash_value', String))
+                 
+    with engine.begin() as connection:
+        stmt = table.update().where(table.c.id == file_id).values(hash_value=hash_value)
+        connection.execute(stmt)
+
+def update_file_hash_batch(conn: sqlite3.Connection, updates: List[Tuple[int, str]]) -> None:
+    """Update hashes for a batch of files (id, hash)."""
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+        
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('hash_value', String))
+    
+    # SQLAlchemy 1.4+ supports bulk updates via list of dicts with bindparam, 
+    # but simple loop in transaction is often fast enough for SQLite.
+    with engine.begin() as connection:
+        for file_id, hash_val in updates:
+            stmt = table.update().where(table.c.id == file_id).values(hash_value=hash_val)
+            connection.execute(stmt)

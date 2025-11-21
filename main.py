@@ -9,12 +9,13 @@ calculating their hashes, storing them in SQLite, and generating HTML reports.
 import argparse
 import os
 import sys
+import time
 from datetime import datetime
 from tqdm import tqdm
 
 # Custom Module Imports
-from utilities.hash_calculator import calculate_directory_hashes, calculate_file_hash, get_file_size
-from utilities.database import initialize_database, save_to_database
+from utilities.hash_calculator import calculate_file_hash, get_file_size
+from utilities.database import initialize_database, upsert_files, get_pending_files, update_file_hash
 from utilities.html_generator import generate_html_report
 
 
@@ -47,56 +48,73 @@ def main():
         print(f"Initializing database at {args.database}")
         conn = initialize_database(args.database)
 
-        # Process files
-        print(f"Calculating {args.algorithm.upper()} hashes for all files in: {path}")
+        # --- PHASE 1: DISCOVERY ---
+        print(f"\n--- Phase 1: Discovery ---")
+        print(f"Scanning directory structure: {path}")
+        
+        discovery_start = time.time()
+        files_to_upsert = []
         
         if os.path.isfile(path):
-            # Single file case
-            file_path = path
-            with tqdm(total=1, desc="Processing file") as pbar:
-                hash_value = calculate_file_hash(file_path, args.algorithm)
-                file_size = get_file_size(file_path)
-                filename = os.path.basename(file_path)
-                scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                pbar.update(1)
-
-            file_data = [(filename, file_path, hash_value, file_size, scan_date)]
+            file_size = get_file_size(path)
+            scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date))
         else:
-            # Directory case - Assuming the original implementation doesn't use tqdm
-            file_data = []
-            # Get all files first to show accurate progress
-            all_files = []
+            # Walk directory and collect metadata
             for root, _, files in os.walk(path):
                 for file in files:
-                    all_files.append(os.path.join(root, file))
+                    file_path = os.path.join(root, file)
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        files_to_upsert.append((file, file_path, file_size, scan_date))
+                    except OSError as e:
+                        print(f"Error accessing {file_path}: {e}")
+
+        print(f"Found {len(files_to_upsert)} files. Syncing with database...")
+        
+        # Upsert to DB (Insert new, Update changed, Reset hash if changed)
+        # We do this in chunks to show progress
+        chunk_size = 5000
+        with tqdm(total=len(files_to_upsert), desc="Syncing metadata") as pbar:
+            for i in range(0, len(files_to_upsert), chunk_size):
+                chunk = files_to_upsert[i:i+chunk_size]
+                upsert_files(conn, chunk)
+                pbar.update(len(chunk))
+                
+        print(f"Discovery completed in {time.time() - discovery_start:.2f} seconds")
+
+        # --- PHASE 2: PROCESSING ---
+        print(f"\n--- Phase 2: Processing ---")
+        
+        # Get files that need hashing (Hash is NULL)
+        pending_files = get_pending_files(conn)
+        
+        if not pending_files:
+            print("All files are already hashed. Nothing to do.")
+        else:
+            print(f"Found {len(pending_files)} files pending hash calculation.")
+            print(f"Calculating {args.algorithm.upper()} hashes...")
             
-            # Process each file with progress bar
-            with tqdm(total=len(all_files), desc="Processing files") as pbar:
-                for file_path in all_files:
+            processing_start = time.time()
+            
+            with tqdm(total=len(pending_files), desc="Hashing files") as pbar:
+                for file_id, file_path in pending_files:
                     try:
                         hash_value = calculate_file_hash(file_path, args.algorithm)
-                        file_size = get_file_size(file_path)
-                        filename = os.path.basename(file_path)
-                        scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        file_data.append((filename, file_path, hash_value, file_size, scan_date))
+                        update_file_hash(conn, file_id, hash_value)
                     except Exception as e:
                         print(f"Error processing {file_path}: {e}")
+                        # Optionally mark as error in DB? For now just skip.
                     pbar.update(1)
-
-        # Save to database
-        print(f"Saving {len(file_data)} file records to database...")
-        with tqdm(total=len(file_data), desc="Saving to database") as pbar:
-            # Since save_to_database doesn't accept a progress bar, we'll handle the progress here
-            save_to_database(conn, file_data)
-            pbar.update(len(file_data))  # Update all at once since we can't track individual inserts
+            
+            print(f"Processing completed in {time.time() - processing_start:.2f} seconds")
 
         # Generate HTML report
-        print("Generating HTML report...")
-        with tqdm(total=1, desc="Generating report") as pbar:
-            generate_html_report(args.database, args.report)
-            pbar.update(1)
+        print("\nGenerating HTML report...")
+        generate_html_report(args.database, args.report)
 
-        print(f"\nProcessed {len(file_data)} files")
+        print(f"\nDone!")
         print(f"Database: {args.database}")
         print(f"HTML Report: {args.report}")
 
@@ -105,6 +123,8 @@ def main():
 
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
 
 

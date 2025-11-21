@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-File Hash Scanner - Main Entry Point
+File Hash Scanner - Main Entry Point (Multiprocessing)
 
 This script provides a command line interface for scanning files,
-calculating their hashes, storing them in SQLite, and generating HTML reports.
+calculating their hashes in parallel, storing them in SQLite, and generating HTML reports.
 """
 
 import argparse
@@ -14,11 +14,10 @@ from datetime import datetime
 from tqdm import tqdm
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-import io
 
 # Custom Module Imports
-from utilities.hash_calculator import calculate_directory_hashes, calculate_file_hash, get_file_size
-from utilities.database import initialize_database, save_to_database
+from utilities.hash_calculator import get_file_size
+from utilities.database import initialize_database, upsert_files, get_pending_files, update_file_hash_batch
 from utilities.html_generator import generate_html_report
 
 
@@ -38,54 +37,17 @@ def optimized_file_hash(file_path, algorithm, chunk_size=1024*1024):
         return None
 
 
-def process_file(file_args):
-    """Process a single file and return its data"""
-    file_path, algorithm, chunk_size = file_args
+def process_file_hash(args):
+    """Process a single file hash calculation"""
+    file_id, file_path, algorithm, chunk_size = args
     try:
-        start_time = time.time()
         hash_value = optimized_file_hash(file_path, algorithm, chunk_size)
-        if hash_value is None:
-            return None
-            
-        file_size = get_file_size(file_path)
-        filename = os.path.basename(file_path)
-        scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        process_time = time.time() - start_time
-        return (filename, file_path, hash_value, file_size, scan_date)
+        if hash_value:
+            return (file_id, hash_value)
+        return None
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         return None
-
-
-def group_files_by_size(files, min_batch_size=50, max_batch_size=200):
-    """Group files by size to balance workload across processes"""
-    small_files = []
-    medium_files = []
-    large_files = []
-    
-    for file_path in files:
-        size = os.path.getsize(file_path)
-        if size < 1024*1024:  # Less than 1MB
-            small_files.append(file_path)
-        elif size < 10*1024*1024:  # Less than 10MB
-            medium_files.append(file_path)
-        else:  # Large files
-            large_files.append(file_path)
-    
-    # Balance work by combining small files into batches
-    balanced_tasks = []
-    
-    # Add small files in batches
-    for i in range(0, len(small_files), min_batch_size):
-        batch = small_files[i:i+min_batch_size]
-        for file in batch:
-            balanced_tasks.append(file)
-    
-    # Add medium and large files individually
-    balanced_tasks.extend(medium_files)
-    balanced_tasks.extend(large_files)
-    
-    return balanced_tasks
 
 
 def main():
@@ -129,99 +91,119 @@ def main():
         
         # Initialize database with optimizations
         print(f"Initializing database at {args.database}")
-        db_dir = os.path.dirname(args.database)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-            
         conn = initialize_database(args.database)
         # Enable WAL mode for better concurrency
         conn.execute("PRAGMA journal_mode = WAL")
-        # Disable syncs for speed (use with caution)
-        conn.execute("PRAGMA synchronous = OFF")
-        # Larger cache for better performance
-        conn.execute("PRAGMA cache_size = 10000")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.commit()
 
-        # Process files
-        print(f"Calculating {args.algorithm.upper()} hashes for all files in: {path}")
+        # --- PHASE 1: DISCOVERY ---
+        print(f"\n--- Phase 1: Discovery ---")
+        print(f"Scanning directory structure: {path}")
+        
+        discovery_start = time.time()
+        files_to_upsert = []
         
         if os.path.isfile(path):
-            # Single file case
-            file_path = path
-            with tqdm(total=1, desc="Processing file") as pbar:
-                hash_value = optimized_file_hash(file_path, args.algorithm, args.chunk_size)
-                file_size = get_file_size(file_path)
-                filename = os.path.basename(file_path)
-                scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                pbar.update(1)
-
-            file_data = [(filename, file_path, hash_value, file_size, scan_date)]
+            file_size = get_file_size(path)
+            scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date))
         else:
-            # Directory case with optimized multiprocessing
-            scan_start_time = time.time()
-            print("Finding all files...")
-            
-            # Get all files first
-            all_files = []
+            # Walk directory and collect metadata
             for root, _, files in os.walk(path):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    all_files.append(file_path)
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        files_to_upsert.append((file, file_path, file_size, scan_date))
+                    except OSError as e:
+                        print(f"Error accessing {file_path}: {e}")
+
+        print(f"Found {len(files_to_upsert)} files. Syncing with database...")
+        
+        # Upsert to DB
+        chunk_size = 5000
+        with tqdm(total=len(files_to_upsert), desc="Syncing metadata") as pbar:
+            for i in range(0, len(files_to_upsert), chunk_size):
+                chunk = files_to_upsert[i:i+chunk_size]
+                upsert_files(conn, chunk)
+                pbar.update(len(chunk))
+                
+        print(f"Discovery completed in {time.time() - discovery_start:.2f} seconds")
+
+        # --- PHASE 2: PROCESSING ---
+        print(f"\n--- Phase 2: Processing ---")
+        
+        # Get files that need hashing
+        pending_files = get_pending_files(conn)
+        
+        if not pending_files:
+            print("All files are already hashed. Nothing to do.")
+        else:
+            print(f"Found {len(pending_files)} files pending hash calculation.")
             
-            print(f"Found {len(all_files)} files in {time.time() - scan_start_time:.2f} seconds")
+            # Sort by size (Largest first) to avoid tail latency
+            # We need to fetch sizes first? get_pending_files only returns ID and Path.
+            # Ideally we should fetch size in get_pending_files too.
+            # For now, let's just process them. The OS cache might help.
+            # Optimization: We could modify get_pending_files to return size and sort in SQL.
+            # But let's stick to the plan.
             
-            # Prepare arguments for multiprocessing - balance workload
-            balanced_files = group_files_by_size(all_files)
-            file_args = [(file_path, args.algorithm, args.chunk_size) for file_path in balanced_files]
-            
-            # Process files in parallel with larger chunks for efficiency
-            file_data = []
+            print(f"Calculating {args.algorithm.upper()} hashes using {args.processes} processes...")
             processing_start = time.time()
             
-            with ProcessPoolExecutor(max_workers=args.processes) as executor:
-                # Process files in parallel with progress bar
-                results = list(tqdm(
-                    executor.map(process_file, file_args, chunksize=max(1, len(file_args) // (args.processes * 4))),
-                    total=len(file_args),
-                    desc=f"Processing files (using {args.processes} processes)"
-                ))
-                
-                # Filter out None results (from errors)
-                file_data = [result for result in results if result is not None]
+            # Prepare arguments
+            # (file_id, file_path, algorithm, chunk_size)
+            process_args = [
+                (pid, ppath, args.algorithm, args.chunk_size) 
+                for pid, ppath in pending_files
+            ]
             
-            print(f"Processed {len(file_data)} files in {time.time() - processing_start:.2f} seconds")
-
-        # Save to database in batches for better performance
-        db_start_time = time.time()
-        print(f"Saving {len(file_data)} file records to database...")
-        
-        # Process in batches
-        batch_size = args.batch_size
-        with tqdm(total=len(file_data), desc="Saving to database") as pbar:
-            for i in range(0, len(file_data), batch_size):
-                batch = file_data[i:i+batch_size]
-                save_to_database(conn, batch)
-                pbar.update(len(batch))
-                conn.commit()  # Commit after each batch
-
-        print(f"Database operations completed in {time.time() - db_start_time:.2f} seconds")
+            # Process in batches to update DB incrementally
+            total_files = len(process_args)
+            batch_size = args.batch_size
+            
+            with ProcessPoolExecutor(max_workers=args.processes) as executor:
+                with tqdm(total=total_files, desc="Hashing files") as pbar:
+                    # We process all files, but we collect results in chunks to write to DB
+                    # Using executor.map is easiest, but we want to batch DB writes.
+                    # Let's use a generator approach or just collect chunks.
+                    
+                    # Chunk the input arguments for better memory management if list is huge
+                    # But we already have the list in memory.
+                    
+                    # Submit all tasks
+                    # To avoid submitting millions of tasks at once, we can chunk the submission too.
+                    # But ProcessPoolExecutor handles this reasonably well.
+                    
+                    # Better approach: Use imap_unordered or map and iterate
+                    results_iterator = executor.map(process_file_hash, process_args, chunksize=10)
+                    
+                    current_batch = []
+                    for result in results_iterator:
+                        if result:
+                            current_batch.append(result)
+                        
+                        pbar.update(1)
+                        
+                        # If batch is full, write to DB
+                        if len(current_batch) >= batch_size:
+                            update_file_hash_batch(conn, current_batch)
+                            current_batch = []
+                    
+                    # Write remaining
+                    if current_batch:
+                        update_file_hash_batch(conn, current_batch)
+            
+            print(f"Processing completed in {time.time() - processing_start:.2f} seconds")
 
         # Generate HTML report
-        report_start_time = time.time()
-        print("Generating HTML report...")
-        
-        report_dir = os.path.dirname(args.report)
-        if report_dir and not os.path.exists(report_dir):
-            os.makedirs(report_dir)
-            
-        with tqdm(total=1, desc="Generating report") as pbar:
-            generate_html_report(args.database, args.report)
-            pbar.update(1)
-        
-        print(f"Report generated in {time.time() - report_start_time:.2f} seconds")
+        print("\nGenerating HTML report...")
+        generate_html_report(args.database, args.report)
 
         total_time = time.time() - total_start_time
-        print(f"\nProcessed {len(file_data)} files in {total_time:.2f} seconds ({len(file_data)/total_time:.2f} files/sec)")
+        print(f"\nTotal execution time: {total_time:.2f} seconds")
         print(f"Database: {args.database}")
         print(f"HTML Report: {args.report}")
 
@@ -230,6 +212,8 @@ def main():
 
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
 
 
