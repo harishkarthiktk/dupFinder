@@ -2,7 +2,7 @@ import os
 import time
 import tempfile
 import shutil
-from datetime import datetime
+import time
 import pytest
 from utilities.database import (
     initialize_database,
@@ -82,7 +82,7 @@ def scan_directory(temp_dir, db_path, algorithm="sha256", simulate_hash_time=Fal
             file_path = os.path.join(root, filename)
             file_size = get_file_size(file_path)
             mtime = get_file_mtime(file_path)
-            scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            scan_date = time.time()
             files.append((filename, file_path, file_size, scan_date, mtime))
     
     # Upsert metadata (this will handle skipping unchanged)
@@ -161,8 +161,9 @@ def test_integration_new_file(temp_scan_dir, temp_db):
     # Don't create file2 yet
     
     # Scan only file1
+    current_epoch = time.time()
     files = [(os.path.basename(file1_path), file1_path, get_file_size(file1_path),
-              datetime.now().strftime("%Y-%m-%d %H:%M:%S"), get_file_mtime(file1_path))]
+              current_epoch, get_file_mtime(file1_path))]
     for item in files:
         filename, abs_path, size, scan_date, mtime = item
         upsert_file_entry(abs_path, filename, size, mtime, scan_date=scan_date)

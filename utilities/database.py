@@ -8,10 +8,10 @@ import os
 from typing import List, Tuple, Optional, Dict, Any
 from contextlib import contextmanager
 import sqlite3
-from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Float, Table, MetaData, select, insert, inspect, case
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Float, Table, MetaData, select, insert, inspect, case, text
 from datetime import datetime, timezone
 import time
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -52,13 +52,8 @@ SessionFactory = None
 
 def initialize_database(db_path: str) -> sqlite3.Connection:
     """
-    Initialize the database connection and create tables.
-    
-    Args:
-        db_path: Path to the SQLite database file
-        
-    Returns:
-        SQLite connection object (for backward compatibility)
+    Initialize the database connection and create/update tables.
+    Handles schema migrations for backward compatibility.
     """
     global engine, SessionFactory
     
@@ -68,7 +63,6 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
         os.makedirs(db_dir)
         
     # Create SQLAlchemy engine
-    # Use 4 slashes for absolute path on Windows, 3 for relative
     if os.name == 'nt':
         db_url = f"sqlite:///{os.path.abspath(db_path)}"
     else:
@@ -76,49 +70,131 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
         
     engine = create_engine(db_url, **DB_CONFIG["connection_params"]["sqlite"])
     
-    # Create tables
     metadata = MetaData()
+    # Define tables with the LATEST schema
     file_hashes_table = Table('file_hashes', metadata,
                  Column('id', Integer, primary_key=True),
                  Column('filename', String, nullable=False),
                  Column('absolute_path', String, nullable=False, unique=True),
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger, nullable=False),
-                 Column('scan_date', Float, nullable=False),
+                 Column('scan_date', Float, nullable=False), # Latest schema
                  Column('mtime', Float, nullable=True))
     
     scan_metadata_table = Table('scan_metadata', metadata,
-                               Column('id', Integer, primary_key=True),
-                               Column('last_scan_timestamp', Float, nullable=True))
-    
-    metadata.create_all(engine)
-    
-    # Handle backward compatibility: Add mtime column if it doesn't exist
+                                Column('id', Integer, primary_key=True),
+                                Column('last_scan_timestamp', Float, nullable=True))
+
     inspector = inspect(engine)
-    if 'file_hashes' in inspector.get_table_names():
+    
+    # Check if file_hashes table exists
+    if 'file_hashes' not in inspector.get_table_names():
+        print(f"Creating file_hashes table in {db_path}...")
+        metadata.create_all(engine) # Create tables if they don't exist
+    else:
+        print(f"file_hashes table already exists in {db_path}.")
+        # Check for missing columns and perform ALTER TABLE if needed
         columns = [col['name'] for col in inspector.get_columns('file_hashes')]
+        
+        # Add mtime column if missing
         if 'mtime' not in columns:
+            print("Adding mtime column to file_hashes table...")
             with engine.begin() as conn:
                 conn.execute("ALTER TABLE file_hashes ADD COLUMN mtime REAL")
-    
-    # Create scan_metadata table if it doesn't exist (create_all should handle, but ensure)
-    if 'scan_metadata' not in inspector.get_table_names():
-        scan_metadata_table.create(engine)
-
-    # Check for scan_date migration (from TEXT to float/REAL)
-    columns = [col['name'] for col in inspector.get_columns('file_hashes')]
-    if 'scan_date' in columns:
+        
+        # Check scan_date type for migration
         scan_date_info = next((col for col in inspector.get_columns('file_hashes') if col['name'] == 'scan_date'), None)
+        
+        # If scan_date column exists and is TEXT, trigger migration
         if scan_date_info and str(scan_date_info['type']).upper() == 'TEXT':
+            print("Detected TEXT scan_date column, initiating migration...")
             migrate_scan_date_to_epoch()
-    
+        elif not scan_date_info:
+            print("scan_date column not found in existing file_hashes table. Assuming it was created correctly.")
+            pass
+        else:
+            print("scan_date column is already FLOAT or compatible type. No migration needed.")
+
+    # Ensure all tables are present with checkfirst
+    print("Ensuring all tables are created...")
+    metadata.create_all(engine, checkfirst=True)
+
+    # Create SessionFactory after all schema adjustments
     SessionFactory = scoped_session(sessionmaker(bind=engine))
     
     # Return raw sqlite connection for backward compatibility if needed
-    # But prefer using engine
     return sqlite3.connect(db_path)
 
 
+def migrate_scan_date_to_epoch():
+    """
+    Migrate scan_date from TEXT datetime strings to REAL epoch floats.
+    Handles data conversion and schema type change.
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+    
+    from datetime import datetime
+    import time
+    
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                  Column('id', Integer, primary_key=True),
+                  Column('scan_date', String),  # Temporary for selection
+                  extend_existing=True)
+    
+    with engine.connect() as conn:
+        # Fetch all rows for migration
+        select_stmt = select(table.c.id, table.c.scan_date)
+        result = conn.execute(select_stmt)
+        rows = result.fetchall()
+        
+        updated_count = 0
+        for row in rows:
+            scan_date_str = row.scan_date
+            if scan_date_str is None:
+                continue
+            
+            try:
+                # First, try if already numeric (epoch string)
+                epoch = float(scan_date_str)
+            except ValueError:
+                try:
+                    # Try to parse as datetime string, assuming UTC
+                    dt = datetime.strptime(scan_date_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                    epoch = dt.timestamp()
+                except ValueError:
+                    # Invalid date, set to current time
+                    epoch = time.time()
+            
+            # Update the row with float epoch (will be stored as str in TEXT, but numeric)
+            update_stmt = table.update().where(table.c.id == row.id).values(scan_date=epoch)
+            conn.execute(update_stmt)
+            updated_count += 1
+        
+        conn.commit()
+        print(f"Data migration completed: {updated_count} rows updated.")
+    
+    # Now perform schema type change to REAL
+    with engine.begin() as conn:
+        try:
+            # Add temporary REAL column
+            conn.execute(text("ALTER TABLE file_hashes ADD COLUMN scan_date_new REAL"))
+            
+            # Copy data with CAST (handles numeric strings to REAL)
+            # For any non-numeric (shouldn't be after data migration), but CAST will NULL or error, but we handled
+            conn.execute(text("UPDATE file_hashes SET scan_date_new = CAST(scan_date AS REAL) WHERE scan_date_new IS NULL OR scan_date_new = 0"))
+            
+            # Drop old column
+            conn.execute(text("ALTER TABLE file_hashes DROP COLUMN scan_date"))
+            
+            # Rename new to old
+            conn.execute(text("ALTER TABLE file_hashes RENAME COLUMN scan_date_new TO scan_date"))
+            
+            print("Schema updated: scan_date column now REAL.")
+        except Exception as e:
+            print(f"Schema update failed: {e}. Data migration applied, but column remains TEXT. Retrieval functions will handle casting.")
 def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     """
     Save file data to database (Legacy function, use upsert_files instead).
@@ -201,7 +277,7 @@ def get_all_records(conn: sqlite3.Connection) -> List[Tuple]:
             table.c.scan_date
         )
         result = connection.execute(query)
-        return [row for row in result]
+        return [(row.filename, row.absolute_path, row.hash_value, row.file_size, float(row.scan_date) if row.scan_date is not None else None) for row in result]
 
 def _chunk_data(data, chunk_size):
     """Split data into chunks of specified size for batch processing."""
@@ -435,7 +511,7 @@ def get_file_by_path(absolute_path: str) -> Optional[Dict[str, Any]]:
                 'filename': row.filename,
                 'hash_value': row.hash_value,
                 'file_size': row.file_size,
-                'scan_date': row.scan_date,
+                'scan_date': float(row.scan_date) if row.scan_date is not None else None,
                 'mtime': row.mtime
             }
         return None
@@ -539,45 +615,3 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: 
         
         connection.execute(stmt)
 
-
-def migrate_scan_date_to_epoch() -> None:
-    """
-    Migrate scan_date from string format to epoch float.
-    Assumes old strings are in UTC; parses and converts to timestamp.
-    """
-    global engine
-    if not engine:
-        raise RuntimeError("Database not initialized")
-
-    metadata = MetaData()
-    table = Table('file_hashes', metadata,
-                  Column('id', Integer, primary_key=True),
-                  Column('scan_date', Float),
-                  extend_existing=True)
-
-    with engine.begin() as connection:
-        # Get all rows with string scan_date
-        query = select(table.c.id, table.c.scan_date).where(table.c.scan_date.isnot(None))
-        result = connection.execute(query)
-        rows = result.fetchall()
-
-        migrated_count = 0
-        for row in rows:
-            try:
-                # Parse assuming UTC
-                dt = datetime.strptime(str(row.scan_date), '%Y-%m-%d %H:%M:%S')
-                dt_utc = dt.replace(tzinfo=timezone.utc)
-                epoch = dt_utc.timestamp()
-                
-                # Update the row
-                stmt = table.update().where(table.c.id == row.id).values(scan_date=epoch)
-                connection.execute(stmt)
-                migrated_count += 1
-            except ValueError:
-                # Invalid date format; set to current time
-                current_epoch = time.time()
-                stmt = table.update().where(table.c.id == row.id).values(scan_date=current_epoch)
-                connection.execute(stmt)
-                print(f"Warning: Invalid scan_date '{row.scan_date}' for id {row.id}; set to current time.")
-
-        print(f"Migration completed: {migrated_count} rows updated from string to epoch float.")
