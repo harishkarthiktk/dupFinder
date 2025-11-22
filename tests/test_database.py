@@ -2,7 +2,6 @@ import os
 import time
 import pytest
 import tempfile
-from datetime import datetime
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from utilities.database import (
@@ -73,7 +72,7 @@ def test_is_file_unchanged_true(temp_db):
         1024,
         1234567890.0,
         "abc123hash",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        time.time()
     )
     
     # Set last scan timestamp before the file's mtime
@@ -93,7 +92,7 @@ def test_is_file_unchanged_false_newer_mtime(temp_db):
         1024,
         1234567890.0,
         "abc123hash",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        time.time()
     )
     
     update_last_scan_timestamp(1234567880.0)
@@ -117,7 +116,7 @@ def test_is_file_unchanged_false_no_last_scan(temp_db):
         1024,
         1234567890.0,
         "abc123hash",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        time.time()
     )
     
     # No last scan timestamp set
@@ -166,7 +165,8 @@ def test_upsert_file_entry_update(temp_db):
         "update.txt",
         1024,
         1234567890.0,
-        "oldhash"
+        "oldhash",
+        time.time()
     )
     
     # Update with changed metadata, no hash provided (simulates discovery phase)
@@ -181,3 +181,92 @@ def test_upsert_file_entry_update(temp_db):
     assert result["file_size"] == 2048
     assert result["mtime"] == 1234567892.0
     assert result["hash_value"] == ""  # Reset due to metadata change
+    assert isinstance(result["scan_date"], float)  # Ensure epoch float
+
+
+def test_upsert_file_entry_epoch_storage(temp_db):
+    """Test that upsert_file_entry stores scan_date as epoch float."""
+    path = "/test/path/epoch.txt"
+    epoch_time = 1234567890.0
+    upsert_file_entry(
+        path,
+        "epoch.txt",
+        1024,
+        1234567890.0,
+        None,
+        epoch_time
+    )
+    
+    result = get_file_by_path(path)
+    assert isinstance(result["scan_date"], float)
+    assert result["scan_date"] == epoch_time
+
+
+def test_migrate_scan_date_to_epoch(temp_db):
+    """Test the migration from string scan_date to epoch float."""
+    from utilities.database import engine, migrate_scan_date_to_epoch
+    
+    # Create legacy DB with TEXT scan_date manually
+    legacy_engine = create_engine(f"sqlite:///{temp_db}")
+    with legacy_engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE file_hashes (
+                id INTEGER PRIMARY KEY,
+                filename TEXT NOT NULL,
+                absolute_path TEXT NOT NULL UNIQUE,
+                hash_value TEXT,
+                file_size INTEGER NOT NULL,
+                scan_date TEXT NOT NULL,
+                mtime REAL
+            )
+        """))
+        # Insert sample string data
+        conn.execute(text("""
+            INSERT INTO file_hashes (filename, absolute_path, hash_value, file_size, scan_date, mtime)
+            VALUES ('test.txt', '/test/path.txt', 'abc123', 1024, '2023-01-01 12:00:00', 1234567890.0)
+        """))
+        conn.commit()
+    
+    # Now initialize to trigger migration
+    initialize_database(temp_db)
+    
+    # Verify migration
+    result = get_file_by_path("/test/path.txt")
+    assert isinstance(result["scan_date"], float)
+    # Check approximate conversion (2023-01-01 12:00:00 UTC -> 1672572800.0)
+    assert 1672572800 <= result["scan_date"] <= 1672572800 + 1  # Allow for minor float precision
+
+
+def test_migrate_invalid_date(temp_db):
+    """Test migration handles invalid dates by setting current time."""
+    from utilities.database import engine, migrate_scan_date_to_epoch
+    
+    # Create legacy DB
+    legacy_engine = create_engine(f"sqlite:///{temp_db}")
+    with legacy_engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE file_hashes (
+                id INTEGER PRIMARY KEY,
+                filename TEXT NOT NULL,
+                absolute_path TEXT NOT NULL UNIQUE,
+                hash_value TEXT,
+                file_size INTEGER NOT NULL,
+                scan_date TEXT NOT NULL,
+                mtime REAL
+            )
+        """))
+        # Insert invalid date
+        conn.execute(text("""
+            INSERT INTO file_hashes (filename, absolute_path, hash_value, file_size, scan_date, mtime)
+            VALUES ('invalid.txt', '/invalid/path.txt', 'def456', 2048, 'invalid-date', NULL)
+        """))
+        conn.commit()
+    
+    # Trigger migration
+    initialize_database(temp_db)
+    
+    # Verify set to current time (approximate)
+    result = get_file_by_path("/invalid/path.txt")
+    assert isinstance(result["scan_date"], float)
+    current_time = time.time()
+    assert abs(result["scan_date"] - current_time) < 2  # Within 2 seconds

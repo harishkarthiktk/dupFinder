@@ -14,15 +14,15 @@ The system SHALL initialize a SQLite database at a configurable path, creating n
 - **THEN** the column is added via ALTER TABLE without data loss
 
 ### Requirement: File Metadata Storage
-The system SHALL store file metadata (filename, absolute_path, file_size, scan_date, mtime) and hash_value in the 'file_hashes' table, using upsert logic to insert new files or update existing ones.
+The system SHALL store file metadata (filename, absolute_path, file_size, scan_date as epoch float, mtime as epoch float) and hash_value in the 'file_hashes' table, using upsert logic to insert new files or update existing ones. scan_date SHALL be set to current Unix timestamp (time.time()) on insert/update.
 
 #### Scenario: New File Insertion
 - **WHEN** a discovered file is not in the database
-- **THEN** a new row is inserted with hash_value set to empty string for pending hashing
+- **THEN** a new row is inserted with hash_value set to empty string for pending hashing and scan_date as current epoch timestamp
 
 #### Scenario: Updated File Detection
 - **WHEN** an existing file has changed size or mtime
-- **THEN** the metadata is updated, and hash_value is reset to empty string to trigger re-hashing
+- **THEN** the metadata is updated (including new epoch scan_date), and hash_value is reset to empty string to trigger re-hashing
 
 ### Requirement: Batch Hash Updates
 The system SHALL support batch updates for hash values of multiple files to improve performance during scanning.
@@ -43,7 +43,7 @@ The system SHALL maintain a last_scan_timestamp in the 'scan_metadata' table to 
 
 #### Scenario: Update Scan Timestamp
 - **WHEN** a scan completes
-- **THEN** the current Unix timestamp is inserted or updated in the scan_metadata table
+- **THEN** the current Unix timestamp (time.time()) is inserted or updated in the scan_metadata table
 
 #### Scenario: Retrieve Last Scan Time
 - **WHEN** checking for unchanged files

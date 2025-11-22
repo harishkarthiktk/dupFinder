@@ -10,7 +10,6 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime
 from tqdm import tqdm
 
 # Custom Module Imports
@@ -66,7 +65,7 @@ def main():
         if os.path.isfile(path):
             file_size = get_file_size(path)
             mtime = get_file_mtime(path)
-            scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            scan_date = time.time()
             files_to_upsert.append((os.path.basename(path), path, file_size, scan_date, mtime))
         else:
             # Walk directory and collect metadata
@@ -76,7 +75,7 @@ def main():
                     try:
                         file_size = os.path.getsize(file_path)
                         mtime = get_file_mtime(file_path)
-                        scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        scan_date = time.time()
                         files_to_upsert.append((file, file_path, file_size, scan_date, mtime))
                     except OSError as e:
                         print(f"Error accessing {file_path}: {e}")
@@ -95,7 +94,7 @@ def main():
                      Column('absolute_path', String, nullable=False, unique=True),
                      Column('hash_value', String, nullable=True),
                      Column('file_size', BigInteger, nullable=False),
-                     Column('scan_date', String, nullable=False),
+                     Column('scan_date', Float, nullable=False),
                      Column('mtime', Float, nullable=True),
                      extend_existing=True)
         

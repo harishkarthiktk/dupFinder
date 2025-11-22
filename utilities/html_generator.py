@@ -1,6 +1,7 @@
 import sqlite3
 import argparse
 from collections import defaultdict
+from datetime import datetime
 
 # Custom module Imports
 from utilities.utils import format_file_size, get_size_category
@@ -16,6 +17,13 @@ def generate_html_report(db_path: str, output_path: str) -> None:
     """
     conn = sqlite3.connect(db_path)
     records = get_all_records(conn)
+    
+    # Convert scan_date epoch to local human-readable for display
+    scan_date_display = 'N/A'
+    if records:
+        scan_epoch = records[0][4]  # scan_date is now float epoch
+        if scan_epoch:
+            scan_date_display = datetime.fromtimestamp(scan_epoch).strftime('%Y-%m-%d %H:%M:%S %Z')
 
     # Group duplicates by hash
     hash_groups = defaultdict(list)
@@ -46,7 +54,7 @@ def generate_html_report(db_path: str, output_path: str) -> None:
     <h1>File Hash Report</h1>
     <div id="filterControls">
         <p><strong>Total Files:</strong> {len(records)}</p>
-        <p><strong>Scan Date:</strong> {records[0][4] if records else 'N/A'}</p>
+        <p><strong>Scan Date:</strong> {scan_date_display}</p>
         <div>
             <label for="excludeFilter">Exclude paths containing:</label>
             <input type="text" id="excludeFilter" placeholder="Enter text to exclude">

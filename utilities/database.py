@@ -9,6 +9,8 @@ from typing import List, Tuple, Optional, Dict, Any
 from contextlib import contextmanager
 import sqlite3
 from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Float, Table, MetaData, select, insert, inspect, case
+from datetime import datetime, timezone
+import time
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
@@ -82,7 +84,7 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
                  Column('absolute_path', String, nullable=False, unique=True),
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger, nullable=False),
-                 Column('scan_date', String, nullable=False),
+                 Column('scan_date', Float, nullable=False),
                  Column('mtime', Float, nullable=True))
     
     scan_metadata_table = Table('scan_metadata', metadata,
@@ -102,6 +104,13 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
     # Create scan_metadata table if it doesn't exist (create_all should handle, but ensure)
     if 'scan_metadata' not in inspector.get_table_names():
         scan_metadata_table.create(engine)
+
+    # Check for scan_date migration (from TEXT to float/REAL)
+    columns = [col['name'] for col in inspector.get_columns('file_hashes')]
+    if 'scan_date' in columns:
+        scan_date_info = next((col for col in inspector.get_columns('file_hashes') if col['name'] == 'scan_date'), None)
+        if scan_date_info and str(scan_date_info['type']).upper() == 'TEXT':
+            migrate_scan_date_to_epoch()
     
     SessionFactory = scoped_session(sessionmaker(bind=engine))
     
@@ -116,7 +125,7 @@ def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     
     Args:
         conn: SQLite connection object
-        file_data: List of tuples (filename, absolute_path, hash_value, file_size, scan_date)
+        file_data: List of tuples (filename, absolute_path, hash_value, file_size, scan_date) where scan_date is epoch float
     """
     global engine
     if not engine:
@@ -140,7 +149,7 @@ def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('absolute_path', String, unique=True),
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String),
+                 Column('scan_date', Float),
                  Column('mtime', Float))
 
     with engine.begin() as connection:
@@ -178,7 +187,7 @@ def get_all_records(conn: sqlite3.Connection) -> List[Tuple]:
                  Column('absolute_path', String),
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String),
+                 Column('scan_date', Float),
                  Column('mtime', Float),
                  extend_existing=True)
     
@@ -218,12 +227,12 @@ def get_session():
 
 def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     """
-    Insert new files or update existing ones. 
+    Insert new files or update existing ones.
     If a file exists but size/mtime changed, reset hash to NULL.
     
     Args:
         conn: SQLite connection object (ignored)
-        file_data: List of tuples (filename, absolute_path, file_size, scan_date)
+        file_data: List of tuples (filename, absolute_path, file_size, scan_date) where scan_date is epoch float
     """
     global engine
     if not engine:
@@ -237,7 +246,7 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('absolute_path', String, unique=True),
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String),
+                 Column('scan_date', Float),
                  Column('mtime', Float))
 
     # Extract paths to query
@@ -412,7 +421,7 @@ def get_file_by_path(absolute_path: str) -> Optional[Dict[str, Any]]:
                  Column('absolute_path', String),
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String),
+                 Column('scan_date', Float),
                  Column('mtime', Float),
                  extend_existing=True)
     
@@ -459,7 +468,7 @@ def is_file_unchanged(absolute_path: str, current_mtime: float) -> bool:
 
 
 def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: float,
-                     hash_value: str = None, scan_date: str = None) -> None:
+                      hash_value: str = None, scan_date: float = None) -> None:
     """
     Upsert a file entry with metadata including mtime and optional hash.
     
@@ -481,7 +490,7 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: 
     from datetime import datetime
     import os
     
-    current_scan_date = scan_date or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    current_scan_date = scan_date if scan_date is not None else time.time()
     
     metadata = MetaData()
     table = Table('file_hashes', metadata,
@@ -490,7 +499,7 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: 
                  Column('absolute_path', String, unique=True),
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String),
+                 Column('scan_date', Float),
                  Column('mtime', Float),
                  extend_existing=True)
     
@@ -529,3 +538,46 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: 
             stmt = insert(table).values(**values)
         
         connection.execute(stmt)
+
+
+def migrate_scan_date_to_epoch() -> None:
+    """
+    Migrate scan_date from string format to epoch float.
+    Assumes old strings are in UTC; parses and converts to timestamp.
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                  Column('id', Integer, primary_key=True),
+                  Column('scan_date', Float),
+                  extend_existing=True)
+
+    with engine.begin() as connection:
+        # Get all rows with string scan_date
+        query = select(table.c.id, table.c.scan_date).where(table.c.scan_date.isnot(None))
+        result = connection.execute(query)
+        rows = result.fetchall()
+
+        migrated_count = 0
+        for row in rows:
+            try:
+                # Parse assuming UTC
+                dt = datetime.strptime(str(row.scan_date), '%Y-%m-%d %H:%M:%S')
+                dt_utc = dt.replace(tzinfo=timezone.utc)
+                epoch = dt_utc.timestamp()
+                
+                # Update the row
+                stmt = table.update().where(table.c.id == row.id).values(scan_date=epoch)
+                connection.execute(stmt)
+                migrated_count += 1
+            except ValueError:
+                # Invalid date format; set to current time
+                current_epoch = time.time()
+                stmt = table.update().where(table.c.id == row.id).values(scan_date=current_epoch)
+                connection.execute(stmt)
+                print(f"Warning: Invalid scan_date '{row.scan_date}' for id {row.id}; set to current time.")
+
+        print(f"Migration completed: {migrated_count} rows updated from string to epoch float.")
