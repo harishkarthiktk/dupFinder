@@ -26,17 +26,34 @@ BATCH_SIZE = 1000  # Number of files to process before database commit
 def main():
     """Main entry point for the file hash scanner."""
     parser = argparse.ArgumentParser(
-        description="Calculate hashes for all files in a directory recursively and store in SQLite database."
+        description="Scan files in a directory, calculate hashes, store in SQLite, and generate HTML reports.",
+        epilog="""
+Examples:
+  python main.py /path/to/scan  # Default settings
+  python main.py /path/to/scan -a md5 -d custom.db -r report.html -v  # Custom options with verbose output
+Note: For large directories, consider using main_mul.py for multiprocessing.
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("path", help="Path to the directory or file to scan.")
-    parser.add_argument(
-        "-a", "--algorithm", default="sha256", help="Hash algorithm (md5, sha1, sha256, etc.)"
+    parser.add_argument('--version', action='version', version='%(prog)s 1.0 (dupFinder File Hash Scanner)')
+
+    core_group = parser.add_argument_group('Core Options')
+    core_group.add_argument("path", help="Path to the directory to scan recursively or a single file. Required.")
+    core_group.add_argument(
+        "-a", "--algorithm", choices=['md5', 'sha1', 'sha256', 'sha512'], default="md5",
+        help="Hashing algorithm. Possible values: %(choices)s. Default: %(default)s."
     )
-    parser.add_argument(
-        "-d", "--database", default="./outputs/file_hashes.db", help="SQLite database file path"
+    core_group.add_argument(
+        "-d", "--database", default="./outputs/file_hashes.db",
+        help="Path to the SQLite database file for storing file metadata and hashes. Default: %(default)s."
     )
-    parser.add_argument(
-        "-r", "--report", default="./outputs/hash_report.html", help="Output HTML report file path"
+    core_group.add_argument(
+        "-r", "--report", default="./outputs/hash_report.html",
+        help="Path for the generated interactive HTML report. Default: %(default)s."
+    )
+    core_group.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Enable verbose output for detailed processing information and debug logging."
     )
 
     args = parser.parse_args()
@@ -74,12 +91,17 @@ def main():
                 for file in files:
                     file_path = os.path.join(root, file)
                     try:
+                        if args.verbose:
+                            print(f"Discovering {file_path}")
                         file_size = os.path.getsize(file_path)
                         mtime = get_file_mtime(file_path)
                         scan_date = time.time()
                         files_to_upsert.append((file, file_path, file_size, scan_date, mtime))
                     except OSError as e:
                         print(f"Error accessing {file_path}: {e}")
+                        if args.verbose:
+                            import traceback
+                            traceback.print_exc()
 
         print(f"Found {len(files_to_upsert)} files. Syncing with database...")
         
@@ -175,10 +197,15 @@ def main():
                 current_batch = []
                 for file_id, file_path in pending_files:
                     try:
+                        if args.verbose:
+                            print(f"Hashing {file_path} with {args.algorithm}")
                         hash_value = calculate_file_hash(file_path, args.algorithm)
                         current_batch.append((file_id, hash_value))
                     except Exception as e:
                         print(f"Error processing {file_path}: {e}")
+                        if args.verbose:
+                            import traceback
+                            traceback.print_exc()
                         # Optionally mark as error in DB? For now just skip.
                     
                     pbar.update(1)

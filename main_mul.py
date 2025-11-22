@@ -54,29 +54,49 @@ def process_file_hash(args):
 def main():
     """Main entry point for the file hash scanner."""
     parser = argparse.ArgumentParser(
-        description="Calculate hashes for all files in a directory recursively and store in SQLite database."
+        description="Scan files in a directory, calculate hashes, store in SQLite, and generate HTML reports.",
+        epilog="""
+Examples:
+  python main_mul.py /path/to/scan -p 4  # Use 4 processes
+  python main_mul.py /path/to/scan -a sha1 -c 8MB -b 2000 -v  # Custom perf + core with verbose
+  python main_mul.py /path/to/scan -p 8 -c 8388608 -b 500  # Explicit 8MB chunk, small batches
+Note: Optimal for large scans; auto-detects CPU cores.
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("path", help="Path to the directory or file to scan.")
-    parser.add_argument(
-        "-a", "--algorithm", default="sha256", help="Hash algorithm (md5, sha1, sha256, etc.)"
+    parser.add_argument('--version', action='version', version='%(prog)s 1.0 (dupFinder File Hash Scanner)')
+
+    core_group = parser.add_argument_group('Core Options')
+    core_group.add_argument("path", help="Path to the directory to scan recursively or a single file. Required.")
+    core_group.add_argument(
+        "-a", "--algorithm", choices=['md5', 'sha1', 'sha256', 'sha512'], default="md5",
+        help="Hashing algorithm. Possible values: %(choices)s. Default: %(default)s."
     )
-    parser.add_argument(
-        "-d", "--database", default="./outputs/file_hashes.db", help="SQLite database file path"
+    core_group.add_argument(
+        "-d", "--database", default="./outputs/file_hashes.db",
+        help="Path to the SQLite database file for storing file metadata and hashes. Default: %(default)s."
     )
-    parser.add_argument(
-        "-r", "--report", default="./outputs/hash_report.html", help="Output HTML report file path"
+    core_group.add_argument(
+        "-r", "--report", default="./outputs/hash_report.html",
+        help="Path for the generated interactive HTML report. Default: %(default)s."
     )
-    parser.add_argument(
+    core_group.add_argument(
+        "-v", "--verbose", action='store_true',
+        help="Enable verbose output for detailed processing information and debug logging."
+    )
+
+    perf_group = parser.add_argument_group('Performance Options')
+    perf_group.add_argument(
         "-p", "--processes", type=int, default=multiprocessing.cpu_count(),
-        help="Number of processes to use (default: number of CPU cores)"
+        help="Number of parallel processes for hash calculation. Use 0 for auto (CPU cores). Default: %(default)s."
     )
-    parser.add_argument(
+    perf_group.add_argument(
         "-c", "--chunk-size", type=int, default=4*1024*1024,
-        help="Read buffer chunk size in bytes (default: 4MB)"
+        help="Buffer size for reading files during hashing (bytes). Larger values improve I/O for big files but increase memory use. Default: %(default)s (4MB). Examples: 1MB=1048576, 8MB=8388608."
     )
-    parser.add_argument(
+    perf_group.add_argument(
         "-b", "--batch-size", type=int, default=1000,
-        help="Number of files to process before database commit (default: 1000)"
+        help="Number of hashes to process and commit to database in batches. Higher values reduce DB overhead but increase memory. Default: %(default)s."
     )
 
     args = parser.parse_args()
@@ -118,12 +138,17 @@ def main():
                 for file in files:
                     file_path = os.path.join(root, file)
                     try:
+                        if args.verbose:
+                            print(f"Discovering {file_path}")
                         file_size = os.path.getsize(file_path)
                         mtime = get_file_mtime(file_path)
                         scan_date = time.time()
                         files_to_upsert.append((file, file_path, file_size, scan_date, mtime))
                     except OSError as e:
                         print(f"Error accessing {file_path}: {e}")
+                        if args.verbose:
+                            import traceback
+                            traceback.print_exc()
 
         print(f"Found {len(files_to_upsert)} files. Syncing with database...")
         
@@ -255,6 +280,9 @@ def main():
                             current_batch.append(result)
                         
                         pbar.update(1)
+                        
+                        if args.verbose and len(current_batch) % 100 == 0:
+                            print(f"Processed batch of {len(current_batch)} hashes so far...")
                         
                         # If batch is full, write to DB
                         if len(current_batch) >= batch_size:
