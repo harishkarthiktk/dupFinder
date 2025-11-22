@@ -57,6 +57,23 @@ def get_file_size(file_path: str) -> int:
         return -1
 
 
+def get_file_mtime(file_path: str) -> float:
+    """
+    Get the modification time of a file as Unix timestamp.
+    
+    Args:
+        file_path: Path to the file
+        
+    Returns:
+        Modification time as float (Unix timestamp), or 0.0 if error
+    """
+    try:
+        return os.path.getmtime(file_path)
+    except (IOError, OSError) as e:
+        print(f"Warning: Could not get mtime for {file_path}: {e}", file=sys.stderr)
+        return 0.0
+
+
 def calculate_directory_hashes(directory: str, algorithm: str = "sha256") -> List[Tuple]:
     """
     Recursively crawl directory and calculate hashes and sizes for all files.

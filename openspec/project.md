@@ -37,3 +37,13 @@ The domain focuses on file system analysis for duplicates, emphasizing hash-base
 - None; all dependencies are Python packages listed in requirements.txt.
 - SQLite is built-in to Python; no additional setup required.
 - Generated HTML reports are static and viewable in any modern browser.
+
+## Specifications
+The baseline specifications for core capabilities are defined in the following spec files:
+- [file-discovery](specs/file-discovery/spec.md): Recursive scanning and path handling.
+- [metadata-collection](specs/metadata-collection/spec.md): Extraction of file metadata including size and mtime.
+- [hash-calculation](specs/hash-calculation/spec.md): Computation of file hashes with configurable algorithms.
+- [database-management](specs/database-management/spec.md): SQLite operations for storage and querying.
+- [report-generation](specs/report-generation/spec.md): Interactive HTML report creation.
+- [scan-optimization](specs/scan-optimization/spec.md): Skipping unchanged files and batch processing.
+- [multiprocessing-support](specs/multiprocessing-support/spec.md): Parallel hash calculation for performance.

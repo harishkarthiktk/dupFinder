@@ -16,9 +16,11 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
 # Custom Module Imports
-from utilities.hash_calculator import get_file_size
-from utilities.database import initialize_database, upsert_files, get_pending_files, update_file_hash_batch
+from utilities.hash_calculator import get_file_size, get_file_mtime
+from utilities.database import initialize_database, get_pending_files, update_file_hash_batch, get_last_scan_timestamp, update_last_scan_timestamp, _chunk_data
 from utilities.html_generator import generate_html_report
+
+from sqlalchemy import Column, Integer, String, BigInteger, Float, Table, MetaData, select, insert
 
 
 def optimized_file_hash(file_path, algorithm, chunk_size=1024*1024):
@@ -92,6 +94,8 @@ def main():
         # Initialize database with optimizations
         print(f"Initializing database at {args.database}")
         conn = initialize_database(args.database)
+        # Import engine after initialization to get the updated value
+        from utilities.database import engine
         # Enable WAL mode for better concurrency
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
@@ -106,8 +110,9 @@ def main():
         
         if os.path.isfile(path):
             file_size = get_file_size(path)
+            mtime = get_file_mtime(path)
             scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date))
+            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date, mtime))
         else:
             # Walk directory and collect metadata
             for root, _, files in os.walk(path):
@@ -115,21 +120,86 @@ def main():
                     file_path = os.path.join(root, file)
                     try:
                         file_size = os.path.getsize(file_path)
+                        mtime = get_file_mtime(file_path)
                         scan_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        files_to_upsert.append((file, file_path, file_size, scan_date))
+                        files_to_upsert.append((file, file_path, file_size, scan_date, mtime))
                     except OSError as e:
                         print(f"Error accessing {file_path}: {e}")
 
         print(f"Found {len(files_to_upsert)} files. Syncing with database...")
         
-        # Upsert to DB
-        chunk_size = 5000
-        with tqdm(total=len(files_to_upsert), desc="Syncing metadata") as pbar:
-            for i in range(0, len(files_to_upsert), chunk_size):
-                chunk = files_to_upsert[i:i+chunk_size]
-                upsert_files(conn, chunk)
-                pbar.update(len(chunk))
+        # Batch query existing files
+        paths = [item[1] for item in files_to_upsert]
+        existing_files = {}
+        last_scan_ts = get_last_scan_timestamp()
+        
+        metadata = MetaData()
+        table = Table('file_hashes', metadata,
+                     Column('id', Integer, primary_key=True),
+                     Column('filename', String, nullable=False),
+                     Column('absolute_path', String, nullable=False, unique=True),
+                     Column('hash_value', String, nullable=True),
+                     Column('file_size', BigInteger, nullable=False),
+                     Column('scan_date', String, nullable=False),
+                     Column('mtime', Float, nullable=True),
+                     extend_existing=True)
+        
+        with engine.connect() as connection:
+            for chunk_paths in _chunk_data(paths, 900):
+                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.mtime).where(table.c.absolute_path.in_(chunk_paths))
+                result = connection.execute(query)
+                for row in result:
+                    existing_files[row.absolute_path] = {
+                        'file_size': row.file_size,
+                        'hash_value': row.hash_value,
+                        'mtime': row.mtime
+                    }
+        
+        # Process each file
+        inserts = []
+        updates = []
+        skipped_count = 0
+        
+        with tqdm(total=len(files_to_upsert), desc="Processing metadata") as pbar:
+            for item in files_to_upsert:
+                filename, abs_path, size, scan_date, mtime = item
+                stored = existing_files.get(abs_path)
+                hash_to_set = ''
+                if (stored and
+                    stored['hash_value'] and stored['hash_value'] != '' and
+                    stored['mtime'] is not None and
+                    last_scan_ts is not None and
+                    stored['file_size'] == size and
+                    stored['mtime'] >= last_scan_ts and
+                    mtime <= stored['mtime']):
+                    hash_to_set = stored['hash_value']
+                    skipped_count += 1
                 
+                values = {
+                    'filename': filename,
+                    'absolute_path': abs_path,
+                    'file_size': size,
+                    'scan_date': scan_date,
+                    'mtime': mtime,
+                    'hash_value': hash_to_set
+                }
+                
+                if stored:
+                    updates.append(values)
+                else:
+                    inserts.append(values)
+                
+                pbar.update(1)
+        
+        # Batch insert and update
+        with engine.begin() as connection:
+            if inserts:
+                connection.execute(insert(table), inserts)
+            for update_item in updates:
+                stmt = table.update().where(table.c.absolute_path == update_item['absolute_path']).values(**update_item)
+                connection.execute(stmt)
+        
+        print(f"Processed metadata. Skipped hashing {skipped_count} unchanged files.")
         print(f"Discovery completed in {time.time() - discovery_start:.2f} seconds")
 
         # --- PHASE 2: PROCESSING ---
@@ -198,6 +268,9 @@ def main():
             
             print(f"Processing completed in {time.time() - processing_start:.2f} seconds")
 
+        # Update last scan timestamp
+        update_last_scan_timestamp(time.time())
+        
         # Generate HTML report
         print("\nGenerating HTML report...")
         generate_html_report(args.database, args.report)

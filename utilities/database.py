@@ -8,7 +8,7 @@ import os
 from typing import List, Tuple, Optional, Dict, Any
 from contextlib import contextmanager
 import sqlite3
-from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Table, MetaData, select, insert, inspect, case
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Float, Table, MetaData, select, insert, inspect, case
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
@@ -76,15 +76,32 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
     
     # Create tables
     metadata = MetaData()
-    table = Table('file_hashes', metadata,
+    file_hashes_table = Table('file_hashes', metadata,
                  Column('id', Integer, primary_key=True),
                  Column('filename', String, nullable=False),
                  Column('absolute_path', String, nullable=False, unique=True),
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger, nullable=False),
-                 Column('scan_date', String, nullable=False))
+                 Column('scan_date', String, nullable=False),
+                 Column('mtime', Float, nullable=True))
+    
+    scan_metadata_table = Table('scan_metadata', metadata,
+                               Column('id', Integer, primary_key=True),
+                               Column('last_scan_timestamp', Float, nullable=True))
     
     metadata.create_all(engine)
+    
+    # Handle backward compatibility: Add mtime column if it doesn't exist
+    inspector = inspect(engine)
+    if 'file_hashes' in inspector.get_table_names():
+        columns = [col['name'] for col in inspector.get_columns('file_hashes')]
+        if 'mtime' not in columns:
+            with engine.begin() as conn:
+                conn.execute("ALTER TABLE file_hashes ADD COLUMN mtime REAL")
+    
+    # Create scan_metadata table if it doesn't exist (create_all should handle, but ensure)
+    if 'scan_metadata' not in inspector.get_table_names():
+        scan_metadata_table.create(engine)
     
     SessionFactory = scoped_session(sessionmaker(bind=engine))
     
@@ -123,7 +140,8 @@ def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('absolute_path', String, unique=True),
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String))
+                 Column('scan_date', String),
+                 Column('mtime', Float))
 
     with engine.begin() as connection:
         for chunk in _chunk_data(data_dicts, 1000):
@@ -161,6 +179,7 @@ def get_all_records(conn: sqlite3.Connection) -> List[Tuple]:
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
                  Column('scan_date', String),
+                 Column('mtime', Float),
                  extend_existing=True)
     
     with engine.connect() as connection:
@@ -218,7 +237,8 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('absolute_path', String, unique=True),
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger),
-                 Column('scan_date', String))
+                 Column('scan_date', String),
+                 Column('mtime', Float))
 
     # Extract paths to query
     paths = [item[1] for item in file_data]
@@ -245,7 +265,8 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                 'absolute_path': absolute_path,
                 'file_size': file_size,
                 'scan_date': scan_date,
-                'hash_value': ''
+                'hash_value': '',
+                'mtime': None
             })
         elif existing_files[absolute_path] != file_size:
             # Changed file (size mismatch) -> Update metadata and reset hash
@@ -254,7 +275,8 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                 'absolute_path': absolute_path,
                 'file_size': file_size,
                 'scan_date': scan_date,
-                'hash_value': ''
+                'hash_value': '',
+                'mtime': None
             })
         # Else: Unchanged file -> Do nothing
 
@@ -276,7 +298,8 @@ def get_pending_files(conn: sqlite3.Connection) -> List[Tuple]:
     table = Table('file_hashes', metadata,
                  Column('id', Integer, primary_key=True),
                  Column('absolute_path', String),
-                 Column('hash_value', String))
+                 Column('hash_value', String),
+                 extend_existing=True)
                  
     with engine.connect() as connection:
         query = select(table.c.id, table.c.absolute_path).where((table.c.hash_value == '') | (table.c.hash_value == None))
@@ -292,7 +315,8 @@ def update_file_hash(conn: sqlite3.Connection, file_id: int, hash_value: str) ->
     metadata = MetaData()
     table = Table('file_hashes', metadata,
                  Column('id', Integer, primary_key=True),
-                 Column('hash_value', String))
+                 Column('hash_value', String),
+                 extend_existing=True)
                  
     with engine.begin() as connection:
         stmt = table.update().where(table.c.id == file_id).values(hash_value=hash_value)
@@ -307,7 +331,8 @@ def update_file_hash_batch(conn: sqlite3.Connection, updates: List[Tuple[int, st
     metadata = MetaData()
     table = Table('file_hashes', metadata,
                  Column('id', Integer, primary_key=True),
-                 Column('hash_value', String))
+                 Column('hash_value', String),
+                 extend_existing=True)
     
     # SQLAlchemy 1.4+ supports bulk updates via list of dicts with bindparam, 
     # but simple loop in transaction is often fast enough for SQLite.
@@ -315,3 +340,192 @@ def update_file_hash_batch(conn: sqlite3.Connection, updates: List[Tuple[int, st
         for file_id, hash_val in updates:
             stmt = table.update().where(table.c.id == file_id).values(hash_value=hash_val)
             connection.execute(stmt)
+
+
+def get_last_scan_timestamp() -> Optional[float]:
+    """
+    Get the last scan timestamp from the database.
+    
+    Returns:
+        The last scan timestamp as float (Unix timestamp), or None if not set.
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+    
+    metadata = MetaData()
+    scan_table = Table('scan_metadata', metadata,
+                      Column('last_scan_timestamp', Float),
+                      extend_existing=True)
+    
+    with engine.connect() as connection:
+        query = select(scan_table.c.last_scan_timestamp)
+        result = connection.execute(query)
+        row = result.fetchone()
+        return row.last_scan_timestamp if row else None
+
+
+def update_last_scan_timestamp(timestamp: float) -> None:
+    """
+    Update or insert the last scan timestamp in the database.
+    
+    Args:
+        timestamp: Unix timestamp (float) for the scan completion time.
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+    
+    metadata = MetaData()
+    scan_table = Table('scan_metadata', metadata,
+                      Column('id', Integer, primary_key=True),
+                      Column('last_scan_timestamp', Float),
+                      extend_existing=True)
+    
+    with engine.begin() as connection:
+        # Try to update existing, else insert
+        existing = connection.execute(select(scan_table.c.id)).fetchone()
+        if existing:
+            stmt = scan_table.update().where(scan_table.c.id == 1).values(last_scan_timestamp=timestamp)
+        else:
+            stmt = insert(scan_table).values(id=1, last_scan_timestamp=timestamp)
+        connection.execute(stmt)
+
+
+def get_file_by_path(absolute_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Get file metadata by absolute path.
+    
+    Args:
+        absolute_path: The absolute path of the file.
+        
+    Returns:
+        Dictionary with file metadata, or None if not found.
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+    
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('filename', String),
+                 Column('absolute_path', String),
+                 Column('hash_value', String),
+                 Column('file_size', BigInteger),
+                 Column('scan_date', String),
+                 Column('mtime', Float),
+                 extend_existing=True)
+    
+    with engine.connect() as connection:
+        query = select(table.c.filename, table.c.hash_value, table.c.file_size,
+                      table.c.scan_date, table.c.mtime).where(table.c.absolute_path == absolute_path)
+        result = connection.execute(query)
+        row = result.fetchone()
+        if row:
+            return {
+                'filename': row.filename,
+                'hash_value': row.hash_value,
+                'file_size': row.file_size,
+                'scan_date': row.scan_date,
+                'mtime': row.mtime
+            }
+        return None
+
+
+def is_file_unchanged(absolute_path: str, current_mtime: float) -> bool:
+    """
+    Check if a file is unchanged since the last scan.
+    
+    This checks if the file exists, has a stored mtime from the last scan,
+    and the current mtime is not newer than the stored mtime.
+    
+    Args:
+        absolute_path: The absolute path of the file.
+        current_mtime: Current modification time of the file (float).
+        
+    Returns:
+        True if unchanged (can reuse hash), False otherwise.
+    """
+    file_info = get_file_by_path(absolute_path)
+    if not file_info or file_info['mtime'] is None:
+        return False
+    
+    last_scan_ts = get_last_scan_timestamp()
+    if last_scan_ts is None:
+        return False  # No previous scan, must hash
+    
+    # Check if stored mtime is from last scan and current <= stored
+    return (file_info['mtime'] >= last_scan_ts and current_mtime <= file_info['mtime'])
+
+
+def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: float,
+                     hash_value: str = None, scan_date: str = None) -> None:
+    """
+    Upsert a file entry with metadata including mtime and optional hash.
+    
+    If the file exists, updates the fields; if new, inserts.
+    If existing file has changed (size or mtime), resets hash_value to '' to mark for re-hashing.
+    
+    Args:
+        absolute_path: Absolute path of the file.
+        filename: Filename.
+        file_size: File size in bytes.
+        mtime: Modification time (float).
+        hash_value: Hash value (optional, set to '' if no hash).
+        scan_date: Scan date string (optional, uses current if None).
+    """
+    global engine
+    if not engine:
+        raise RuntimeError("Database not initialized")
+    
+    from datetime import datetime
+    import os
+    
+    current_scan_date = scan_date or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    metadata = MetaData()
+    table = Table('file_hashes', metadata,
+                 Column('id', Integer, primary_key=True),
+                 Column('filename', String),
+                 Column('absolute_path', String, unique=True),
+                 Column('hash_value', String),
+                 Column('file_size', BigInteger),
+                 Column('scan_date', String),
+                 Column('mtime', Float),
+                 extend_existing=True)
+    
+    with engine.begin() as connection:
+        # Check if exists and get current metadata
+        existing_query = select(table.c.file_size, table.c.mtime, table.c.hash_value).where(table.c.absolute_path == absolute_path)
+        existing = connection.execute(existing_query).fetchone()
+        
+        values = {
+            'filename': filename,
+            'absolute_path': absolute_path,
+            'file_size': file_size,
+            'scan_date': current_scan_date,
+            'mtime': mtime
+        }
+        
+        if existing:
+            # Check for changes
+            if (existing.file_size != file_size or existing.mtime != mtime):
+                # File changed, reset hash
+                values['hash_value'] = ''
+            elif hash_value is not None:
+                # Use provided hash_value if given
+                values['hash_value'] = hash_value
+            else:
+                # Keep existing hash if no change and no new hash provided
+                values['hash_value'] = existing.hash_value
+            
+            stmt = table.update().where(table.c.absolute_path == absolute_path).values(**values)
+        else:
+            # New file, set hash to '' if not provided
+            if hash_value is None:
+                values['hash_value'] = ''
+            else:
+                values['hash_value'] = hash_value
+            stmt = insert(table).values(**values)
+        
+        connection.execute(stmt)
