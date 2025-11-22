@@ -48,6 +48,7 @@ def main():
         return 1
 
     try:
+        total_start_time = time.time()
         # Initialize database
         print(f"Initializing database at {args.database}")
         conn = initialize_database(args.database)
@@ -200,7 +201,8 @@ def main():
         print("\nGenerating HTML report...")
         generate_html_report(args.database, args.report)
 
-        print(f"\nDone!")
+        total_time = time.time() - total_start_time
+        print(f"\nTotal execution time: {total_time:.2f} seconds")
         print(f"Database: {args.database}")
         print(f"HTML Report: {args.report}")
 
