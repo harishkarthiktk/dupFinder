@@ -119,6 +119,21 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
     print("Ensuring all tables are created...")
     metadata.create_all(engine, checkfirst=True)
 
+    # Optional: Validate existing paths for relativity (forward compatibility check)
+    if 'file_hashes' in inspector.get_table_names():
+        file_hashes_table = Table('file_hashes', metadata,
+                                  Column('absolute_path', String),
+                                  extend_existing=True)
+        with engine.connect() as conn:
+            result = conn.execute(select(file_hashes_table.c.absolute_path))
+            relative_count = 0
+            for row in result:
+                if row.absolute_path and not os.path.isabs(row.absolute_path):
+                    relative_count += 1
+            if relative_count > 0:
+                print(f"Warning: {relative_count} relative paths found in existing database. "
+                      f"Consider migrating to absolute paths for consistency across working directories.")
+
     # Create SessionFactory after all schema adjustments
     SessionFactory = scoped_session(sessionmaker(bind=engine))
     
@@ -306,6 +321,9 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     Insert new files or update existing ones.
     If a file exists but size/modified_time changed, reset hash to NULL.
     
+    All paths in file_data must use full root-relative absolute paths (e.g., '/home/user/file.txt' on Linux or 'C:\\Users\\user\\file.txt' on Windows)
+    for consistency across scans from different working directories. Relative paths should be normalized using os.path.abspath() before calling this function.
+    
     Args:
         conn: SQLite connection object (ignored)
         file_data: List of tuples (filename, absolute_path, file_size, scan_date) where scan_date is epoch float
@@ -313,6 +331,13 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     global engine
     if not engine:
         raise RuntimeError("Database not initialized")
+
+    # Normalize paths to absolute if not already
+    normalized_file_data = []
+    for filename, abs_path, file_size, scan_date in file_data:
+        if not os.path.isabs(abs_path):
+            abs_path = os.path.abspath(abs_path)
+        normalized_file_data.append((filename, abs_path, file_size, scan_date))
 
     # Get existing files to decide what to do
     metadata = MetaData()
@@ -326,7 +351,7 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('modified_time', Float))
 
     # Extract paths to query
-    paths = [item[1] for item in file_data]
+    paths = [item[1] for item in normalized_file_data]
     
     existing_files = {}
     with engine.connect() as connection:
@@ -340,7 +365,7 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     inserts = []
     updates = []
 
-    for item in file_data:
+    for item in normalized_file_data:
         filename, absolute_path, file_size, scan_date = item
         
         if absolute_path not in existing_files:
@@ -502,13 +527,14 @@ def get_file_by_path(absolute_path: str) -> Optional[Dict[str, Any]]:
                  extend_existing=True)
     
     with engine.connect() as connection:
-        query = select(table.c.filename, table.c.hash_value, table.c.file_size,
+        query = select(table.c.filename, table.c.absolute_path, table.c.hash_value, table.c.file_size,
                       table.c.scan_date, table.c.modified_time).where(table.c.absolute_path == absolute_path)
         result = connection.execute(query)
         row = result.fetchone()
         if row:
             return {
                 'filename': row.filename,
+                'absolute_path': row.absolute_path,
                 'hash_value': row.hash_value,
                 'file_size': row.file_size,
                 'scan_date': float(row.scan_date) if row.scan_date is not None else None,
@@ -551,13 +577,16 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, modifie
     If the file exists, updates the fields; if new, inserts.
     If existing file has changed (size or modified_time), resets hash_value to '' to mark for re-hashing.
     
+    The absolute_path must be a full root-relative absolute path (e.g., '/home/user/file.txt' on Linux or 'C:\\Users\\user\\file.txt' on Windows)
+    to ensure consistency and uniqueness across scans from different working directories. Callers should normalize using os.path.abspath() if needed.
+    
     Args:
-        absolute_path: Absolute path of the file.
+        absolute_path: Full absolute path of the file.
         filename: Filename.
         file_size: File size in bytes.
         modified_time: Modification time (float).
         hash_value: Hash value (optional, set to '' if no hash).
-        scan_date: Scan date string (optional, uses current if None).
+        scan_date: Scan date as epoch float (optional, uses current if None).
     """
     global engine
     if not engine:
@@ -565,6 +594,10 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, modifie
     
     from datetime import datetime
     import os
+    
+    # Normalize absolute_path if not already absolute
+    if not os.path.isabs(absolute_path):
+        absolute_path = os.path.abspath(absolute_path)
     
     current_scan_date = scan_date if scan_date is not None else time.time()
     

@@ -12,6 +12,7 @@ from utilities.database import (
     update_last_scan_timestamp,
     get_last_scan_timestamp,
     upsert_file_entry,
+    upsert_files,
     engine
 )
 
@@ -211,3 +212,36 @@ def test_upsert_file_entry_epoch_storage(temp_db):
     result = get_file_by_path(path)
     assert isinstance(result["scan_date"], float)
     assert result["scan_date"] == epoch_time
+
+
+def test_upsert_normalization_relative_paths(temp_db):
+    """Test that upsert functions normalize relative paths to absolute in storage."""
+    current_dir = os.getcwd()
+    rel_path = "test_rel.txt"
+    abs_path = os.path.abspath(rel_path)
+    current_epoch = time.time()
+    
+    # Test upsert_file_entry with relative path
+    upsert_file_entry(
+        rel_path,
+        "test_rel.txt",
+        1024,
+        current_epoch,
+        None,
+        current_epoch
+    )
+    result_entry = get_file_by_path(abs_path)
+    assert result_entry is not None
+    assert result_entry["absolute_path"] == abs_path  # Normalized to absolute
+    assert os.path.isabs(result_entry["absolute_path"])
+    
+    # Test upsert_files with relative path
+    file_data = [("test_batch.txt", rel_path, 2048, current_epoch)]
+    upsert_files(None, file_data)
+    result_batch = get_file_by_path(abs_path)
+    assert result_batch is not None
+    assert result_batch["absolute_path"] == abs_path  # Normalized
+    assert os.path.isabs(result_batch["absolute_path"])
+    
+    # Clean up
+    # Note: In real test, we'd delete, but since temp_db, it's fine

@@ -59,6 +59,9 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
     args = parser.parse_args()
     path = args.path
 
+    # Normalize path to absolute
+    path = os.path.abspath(path)
+
     # Check if path exists
     if not os.path.exists(path):
         print(f"Error: Path not found -> {path}")
@@ -81,24 +84,26 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
         files_to_upsert = []
         
         if os.path.isfile(path):
-            file_size = get_file_size(path)
-            modified_time = get_file_modified_time(path)
+            abs_path = path  # Already absolute
+            file_size = get_file_size(abs_path)
+            modified_time = get_file_modified_time(abs_path)
             scan_date = time.time()
-            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date, modified_time))
+            files_to_upsert.append((os.path.basename(abs_path), abs_path, file_size, scan_date, modified_time))
         else:
             # Walk directory and collect metadata
             for root, _, files in os.walk(path):
                 for file in files:
                     file_path = os.path.join(root, file)
+                    abs_file_path = os.path.abspath(file_path)  # Ensure absolute
                     try:
                         if args.verbose:
-                            print(f"Discovering {file_path}")
-                        file_size = os.path.getsize(file_path)
-                        modified_time = get_file_modified_time(file_path)
+                            print(f"Discovering {abs_file_path}")
+                        file_size = os.path.getsize(abs_file_path)
+                        modified_time = get_file_modified_time(abs_file_path)
                         scan_date = time.time()
-                        files_to_upsert.append((file, file_path, file_size, scan_date, modified_time))
+                        files_to_upsert.append((file, abs_file_path, file_size, scan_date, modified_time))
                     except OSError as e:
-                        print(f"Error accessing {file_path}: {e}")
+                        print(f"Error accessing {abs_file_path}: {e}")
                         if args.verbose:
                             import traceback
                             traceback.print_exc()

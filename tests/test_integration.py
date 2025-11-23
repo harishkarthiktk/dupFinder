@@ -80,20 +80,26 @@ def scan_directory(temp_dir, db_path, algorithm="sha256", simulate_hash_time=Fal
     for root, _, filenames in os.walk(temp_dir):
         for filename in filenames:
             file_path = os.path.join(root, filename)
-            file_size = get_file_size(file_path)
-            modified_time = get_file_modified_time(file_path)
+            abs_file_path = os.path.abspath(file_path)
+            file_size = get_file_size(abs_file_path)
+            modified_time = get_file_modified_time(abs_file_path)
             scan_date = time.time()
-            files.append((filename, file_path, file_size, scan_date, modified_time))
+            files.append((filename, abs_file_path, file_size, scan_date, modified_time))
     
     # Upsert metadata (this will handle skipping unchanged)
     for item in files:
         filename, abs_path, size, scan_date, modified_time = item
         # In real scan, this would use the batch logic, but for test, upsert directly
         upsert_file_entry(abs_path, filename, size, modified_time, scan_date=scan_date)
+        
+        # Verify stored path is absolute
+        stored = get_file_by_path(abs_path)
+        assert os.path.isabs(stored['absolute_path'])
     
     # Get pending files and hash them
     pending = get_pending_files(None)  # conn is None, uses global engine
     for file_id, file_path in pending:
+        assert os.path.isabs(file_path)  # Verify pending paths are absolute
         if simulate_hash_time:
             time.sleep(0.01)  # Simulate hashing time
         hash_value = calculate_file_hash(file_path, algorithm)
@@ -155,7 +161,7 @@ def test_integration_no_changes(temp_scan_dir, temp_db):
 def test_integration_new_file(temp_scan_dir, temp_db):
     """Test that new files are hashed."""
     # First scan (only file1)
-    file1_path = os.path.join(temp_scan_dir, "file1.txt")
+    file1_path = os.path.abspath(os.path.join(temp_scan_dir, "file1.txt"))
     temp_subdir = os.path.join(temp_scan_dir, "subdir")
     os.mkdir(temp_subdir)
     # Don't create file2 yet
@@ -167,14 +173,17 @@ def test_integration_new_file(temp_scan_dir, temp_db):
     for item in files:
         filename, abs_path, size, scan_date, modified_time = item
         upsert_file_entry(abs_path, filename, size, modified_time, scan_date=scan_date)
+        stored = get_file_by_path(abs_path)
+        assert os.path.isabs(stored['absolute_path'])
     pending = get_pending_files(None)
     for fid, fpath in pending:
+        assert os.path.isabs(fpath)
         h = calculate_file_hash(fpath)
         update_file_hash_batch(None, [(fid, h)])
     update_last_scan_timestamp(time.time())
     
     # Add new file
-    file2_path = os.path.join(temp_scan_dir, "file2.txt")
+    file2_path = os.path.abspath(os.path.join(temp_scan_dir, "file2.txt"))
     with open(file2_path, "w") as f:
         f.write("new content")
     
