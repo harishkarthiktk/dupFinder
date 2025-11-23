@@ -79,7 +79,7 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger, nullable=False),
                  Column('scan_date', Float, nullable=False), # Latest schema
-                 Column('mtime', Float, nullable=True))
+                 Column('modified_time', Float, nullable=True))
     
     scan_metadata_table = Table('scan_metadata', metadata,
                                 Column('id', Integer, primary_key=True),
@@ -96,11 +96,11 @@ def initialize_database(db_path: str) -> sqlite3.Connection:
         # Check for missing columns and perform ALTER TABLE if needed
         columns = [col['name'] for col in inspector.get_columns('file_hashes')]
         
-        # Add mtime column if missing
-        if 'mtime' not in columns:
-            print("Adding mtime column to file_hashes table...")
+        # Add modified_time column if missing
+        if 'modified_time' not in columns:
+            print("Adding modified_time column to file_hashes table...")
             with engine.begin() as conn:
-                conn.execute("ALTER TABLE file_hashes ADD COLUMN mtime REAL")
+                conn.execute("ALTER TABLE file_hashes ADD COLUMN modified_time REAL")
         
         # Check scan_date type for migration
         scan_date_info = next((col for col in inspector.get_columns('file_hashes') if col['name'] == 'scan_date'), None)
@@ -226,7 +226,7 @@ def save_to_database(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
                  Column('scan_date', Float),
-                 Column('mtime', Float))
+                 Column('modified_time', Float))
 
     with engine.begin() as connection:
         for chunk in _chunk_data(data_dicts, 1000):
@@ -264,7 +264,7 @@ def get_all_records(conn: sqlite3.Connection) -> List[Tuple]:
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
                  Column('scan_date', Float),
-                 Column('mtime', Float),
+                 Column('modified_time', Float),
                  extend_existing=True)
     
     with engine.connect() as connection:
@@ -304,7 +304,7 @@ def get_session():
 def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     """
     Insert new files or update existing ones.
-    If a file exists but size/mtime changed, reset hash to NULL.
+    If a file exists but size/modified_time changed, reset hash to NULL.
     
     Args:
         conn: SQLite connection object (ignored)
@@ -323,7 +323,7 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                  Column('hash_value', String, nullable=True),
                  Column('file_size', BigInteger),
                  Column('scan_date', Float),
-                 Column('mtime', Float))
+                 Column('modified_time', Float))
 
     # Extract paths to query
     paths = [item[1] for item in file_data]
@@ -351,7 +351,7 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                 'file_size': file_size,
                 'scan_date': scan_date,
                 'hash_value': '',
-                'mtime': None
+                'modified_time': None
             })
         elif existing_files[absolute_path] != file_size:
             # Changed file (size mismatch) -> Update metadata and reset hash
@@ -361,7 +361,7 @@ def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
                 'file_size': file_size,
                 'scan_date': scan_date,
                 'hash_value': '',
-                'mtime': None
+                'modified_time': None
             })
         # Else: Unchanged file -> Do nothing
 
@@ -498,12 +498,12 @@ def get_file_by_path(absolute_path: str) -> Optional[Dict[str, Any]]:
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
                  Column('scan_date', Float),
-                 Column('mtime', Float),
+                 Column('modified_time', Float),
                  extend_existing=True)
     
     with engine.connect() as connection:
         query = select(table.c.filename, table.c.hash_value, table.c.file_size,
-                      table.c.scan_date, table.c.mtime).where(table.c.absolute_path == absolute_path)
+                      table.c.scan_date, table.c.modified_time).where(table.c.absolute_path == absolute_path)
         result = connection.execute(query)
         row = result.fetchone()
         if row:
@@ -512,50 +512,50 @@ def get_file_by_path(absolute_path: str) -> Optional[Dict[str, Any]]:
                 'hash_value': row.hash_value,
                 'file_size': row.file_size,
                 'scan_date': float(row.scan_date) if row.scan_date is not None else None,
-                'mtime': row.mtime
+                'modified_time': row.modified_time
             }
         return None
 
 
-def is_file_unchanged(absolute_path: str, current_mtime: float) -> bool:
+def is_file_unchanged(absolute_path: str, current_modified_time: float) -> bool:
     """
     Check if a file is unchanged since the last scan.
     
-    This checks if the file exists, has a stored mtime from the last scan,
-    and the current mtime is not newer than the stored mtime.
+    This checks if the file exists, has a stored modified_time from the last scan,
+    and the current modified_time is not newer than the stored modified_time.
     
     Args:
         absolute_path: The absolute path of the file.
-        current_mtime: Current modification time of the file (float).
+        current_modified_time: Current modification time of the file (float).
         
     Returns:
         True if unchanged (can reuse hash), False otherwise.
     """
     file_info = get_file_by_path(absolute_path)
-    if not file_info or file_info['mtime'] is None:
+    if not file_info or file_info['modified_time'] is None:
         return False
     
     last_scan_ts = get_last_scan_timestamp()
     if last_scan_ts is None:
         return False  # No previous scan, must hash
     
-    # Check if stored mtime is from last scan and current <= stored
-    return (file_info['mtime'] >= last_scan_ts and current_mtime <= file_info['mtime'])
+    # Check if stored modified_time is from last scan and current <= stored
+    return (file_info['modified_time'] >= last_scan_ts and current_modified_time <= file_info['modified_time'])
 
 
-def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: float,
+def upsert_file_entry(absolute_path: str, filename: str, file_size: int, modified_time: float,
                       hash_value: str = None, scan_date: float = None) -> None:
     """
-    Upsert a file entry with metadata including mtime and optional hash.
+    Upsert a file entry with metadata including modified_time and optional hash.
     
     If the file exists, updates the fields; if new, inserts.
-    If existing file has changed (size or mtime), resets hash_value to '' to mark for re-hashing.
+    If existing file has changed (size or modified_time), resets hash_value to '' to mark for re-hashing.
     
     Args:
         absolute_path: Absolute path of the file.
         filename: Filename.
         file_size: File size in bytes.
-        mtime: Modification time (float).
+        modified_time: Modification time (float).
         hash_value: Hash value (optional, set to '' if no hash).
         scan_date: Scan date string (optional, uses current if None).
     """
@@ -576,12 +576,12 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: 
                  Column('hash_value', String),
                  Column('file_size', BigInteger),
                  Column('scan_date', Float),
-                 Column('mtime', Float),
+                 Column('modified_time', Float),
                  extend_existing=True)
     
     with engine.begin() as connection:
         # Check if exists and get current metadata
-        existing_query = select(table.c.file_size, table.c.mtime, table.c.hash_value).where(table.c.absolute_path == absolute_path)
+        existing_query = select(table.c.file_size, table.c.modified_time, table.c.hash_value).where(table.c.absolute_path == absolute_path)
         existing = connection.execute(existing_query).fetchone()
         
         values = {
@@ -589,12 +589,12 @@ def upsert_file_entry(absolute_path: str, filename: str, file_size: int, mtime: 
             'absolute_path': absolute_path,
             'file_size': file_size,
             'scan_date': current_scan_date,
-            'mtime': mtime
+            'modified_time': modified_time
         }
         
         if existing:
             # Check for changes
-            if (existing.file_size != file_size or existing.mtime != mtime):
+            if (existing.file_size != file_size or existing.modified_time != modified_time):
                 # File changed, reset hash
                 values['hash_value'] = ''
             elif hash_value is not None:

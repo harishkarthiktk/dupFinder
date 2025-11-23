@@ -3,14 +3,14 @@
 ## Requirements
 
 ### Requirement: Unchanged File Skipping
-The system SHALL skip hash recalculation for files that have not changed since the last scan, based on matching file size, stored mtime, and comparison with the last scan timestamp.
+The system SHALL skip hash recalculation for files that have not changed since the last scan, based on matching file size, stored modified_time, and comparison with the last scan timestamp.
 
 #### Scenario: Unchanged File Detection
-- **WHEN** a file's current size matches the stored size, stored mtime is not null, and current mtime <= stored mtime, and stored mtime >= last_scan_ts
+- **WHEN** a file's current size matches the stored size, stored modified_time is not null, and current modified_time <= stored modified_time, and stored modified_time >= last_scan_ts
 - **THEN** the existing hash_value is retained, and the file is marked as skipped without re-hashing
 
 #### Scenario: Changed File Re-hashing
-- **WHEN** a file's size or mtime indicates a change (e.g., current mtime > stored mtime)
+- **WHEN** a file's size or modified_time indicates a change (e.g., current modified_time > stored modified_time)
 - **THEN** the hash_value is reset to empty string, and the file is queued for re-hashing in the processing phase
 
 ### Requirement: Last Scan Timestamp Tracking
@@ -22,7 +22,7 @@ The system SHALL maintain and update a last_scan_timestamp upon scan completion 
 
 #### Scenario: Timestamp Retrieval
 - **WHEN** checking for unchanged files during discovery
-- **THEN** the last_scan_timestamp is queried to validate if stored mtime is from the previous scan
+- **THEN** the last_scan_timestamp is queried to validate if stored modified_time is from the previous scan
 
 ### Requirement: Batch Metadata Processing
 The system SHALL process file metadata in batches during discovery to optimize database interactions, using chunked queries for existing files.

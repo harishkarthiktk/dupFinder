@@ -10,18 +10,18 @@ The system SHALL initialize a SQLite database at a configurable path, creating n
 - **THEN** the directory is created if needed, tables 'file_hashes' and 'scan_metadata' are created with appropriate schema, and the connection is established
 
 #### Scenario: Existing Database with Missing Columns
-- **WHEN** the database exists but lacks the 'mtime' column
+- **WHEN** the database exists but lacks the 'modified_time' column
 - **THEN** the column is added via ALTER TABLE without data loss
 
 ### Requirement: File Metadata Storage
-The system SHALL store file metadata (filename, absolute_path, file_size, scan_date as epoch float, mtime as epoch float) and hash_value in the 'file_hashes' table, using upsert logic to insert new files or update existing ones. scan_date SHALL be set to current Unix timestamp (time.time()) on insert/update.
+The system SHALL store file metadata (filename, absolute_path, file_size, scan_date as epoch float, modified_time as epoch float) and hash_value in the 'file_hashes' table, using upsert logic to insert new files or update existing ones. scan_date SHALL be set to current Unix timestamp (time.time()) on insert/update.
 
 #### Scenario: New File Insertion
 - **WHEN** a discovered file is not in the database
 - **THEN** a new row is inserted with hash_value set to empty string for pending hashing and scan_date as current epoch timestamp
 
 #### Scenario: Updated File Detection
-- **WHEN** an existing file has changed size or mtime
+- **WHEN** an existing file has changed size or modified_time
 - **THEN** the metadata is updated (including new epoch scan_date), and hash_value is reset to empty string to trigger re-hashing
 
 ### Requirement: Batch Hash Updates
@@ -47,7 +47,7 @@ The system SHALL maintain a last_scan_timestamp in the 'scan_metadata' table to 
 
 #### Scenario: Retrieve Last Scan Time
 - **WHEN** checking for unchanged files
-- **THEN** the last_scan_timestamp is retrieved to compare against file mtimes
+- **THEN** the last_scan_timestamp is retrieved to compare against file modified_times
 
 ### Requirement: Concurrency Optimizations
 The system SHALL configure the database for better concurrency, such as enabling WAL mode in multiprocessing scenarios.

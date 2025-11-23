@@ -41,7 +41,7 @@ The domain focuses on file system analysis for duplicates, emphasizing hash-base
 ## Specifications
 The baseline specifications for core capabilities are defined in the following spec files:
 - [file-discovery](specs/file-discovery/spec.md): Recursive scanning and path handling.
-- [metadata-collection](specs/metadata-collection/spec.md): Extraction of file metadata including size and mtime.
+- [metadata-collection](specs/metadata-collection/spec.md): Extraction of file metadata including size and modified_time.
 - [hash-calculation](specs/hash-calculation/spec.md): Computation of file hashes with configurable algorithms.
 - [database-management](specs/database-management/spec.md): SQLite operations for storage and querying.
 - [report-generation](specs/report-generation/spec.md): Interactive HTML report creation.

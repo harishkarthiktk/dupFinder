@@ -13,7 +13,7 @@ import time
 from tqdm import tqdm
 
 # Custom Module Imports
-from utilities.hash_calculator import calculate_file_hash, get_file_size, get_file_mtime
+from utilities.hash_calculator import calculate_file_hash, get_file_size, get_file_modified_time
 from utilities.database import initialize_database, get_pending_files, update_file_hash, update_file_hash_batch, get_last_scan_timestamp, update_last_scan_timestamp, _chunk_data
 from utilities.html_generator import generate_html_report
 
@@ -82,9 +82,9 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
         
         if os.path.isfile(path):
             file_size = get_file_size(path)
-            mtime = get_file_mtime(path)
+            modified_time = get_file_modified_time(path)
             scan_date = time.time()
-            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date, mtime))
+            files_to_upsert.append((os.path.basename(path), path, file_size, scan_date, modified_time))
         else:
             # Walk directory and collect metadata
             for root, _, files in os.walk(path):
@@ -94,9 +94,9 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
                         if args.verbose:
                             print(f"Discovering {file_path}")
                         file_size = os.path.getsize(file_path)
-                        mtime = get_file_mtime(file_path)
+                        modified_time = get_file_modified_time(file_path)
                         scan_date = time.time()
-                        files_to_upsert.append((file, file_path, file_size, scan_date, mtime))
+                        files_to_upsert.append((file, file_path, file_size, scan_date, modified_time))
                     except OSError as e:
                         print(f"Error accessing {file_path}: {e}")
                         if args.verbose:
@@ -118,18 +118,18 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
                      Column('hash_value', String, nullable=True),
                      Column('file_size', BigInteger, nullable=False),
                      Column('scan_date', Float, nullable=False),
-                     Column('mtime', Float, nullable=True),
+                     Column('modified_time', Float, nullable=True),
                      extend_existing=True)
         
         with engine.connect() as connection:
             for chunk_paths in _chunk_data(paths, 900):
-                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.mtime).where(table.c.absolute_path.in_(chunk_paths))
+                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.modified_time).where(table.c.absolute_path.in_(chunk_paths))
                 result = connection.execute(query)
                 for row in result:
                     existing_files[row.absolute_path] = {
                         'file_size': row.file_size,
                         'hash_value': row.hash_value,
-                        'mtime': row.mtime
+                        'modified_time': row.modified_time
                     }
         
         # Process each file
@@ -139,16 +139,16 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
         
         with tqdm(total=len(files_to_upsert), desc="Processing metadata") as pbar:
             for item in files_to_upsert:
-                filename, abs_path, size, scan_date, mtime = item
+                filename, abs_path, size, scan_date, modified_time = item
                 stored = existing_files.get(abs_path)
                 hash_to_set = ''
                 if (stored and
                     stored['hash_value'] and stored['hash_value'] != '' and
-                    stored['mtime'] is not None and
+                    stored['modified_time'] is not None and
                     last_scan_ts is not None and
                     stored['file_size'] == size and
-                    stored['mtime'] >= last_scan_ts and
-                    mtime <= stored['mtime']):
+                    stored['modified_time'] >= last_scan_ts and
+                    modified_time <= stored['modified_time']):
                     hash_to_set = stored['hash_value']
                     skipped_count += 1
                 
@@ -157,7 +157,7 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
                     'absolute_path': abs_path,
                     'file_size': size,
                     'scan_date': scan_date,
-                    'mtime': mtime,
+                    'modified_time': modified_time,
                     'hash_value': hash_to_set
                 }
                 

@@ -20,7 +20,7 @@ The purpose of the program is find duplicates; but the code is written in 2 majo
   - Text filtering for filenames and paths
   - File size range filtering
   - Human-readable file sizes
-- Incremental scanning using file modification times (mtime) to skip re-hashing unchanged files on subsequent scans, improving performance
+- Incremental scanning using file modification times (modified_time) to skip re-hashing unchanged files on subsequent scans, improving performance
 
 ## Installation
 
@@ -99,7 +99,7 @@ The SQLite database contains a single table `file_hashes` with the following col
 - `hash_value`: File hash as hexadecimal string
 - `file_size`: File size in bytes
 - `scan_date`: Scan timestamp
-- `mtime`: File modification time (Unix timestamp, for optimization)
+- `modified_time`: File modification time (Unix timestamp, for optimization)
 
 Additionally, a `scan_metadata` table tracks the `last_scan_timestamp`.
 

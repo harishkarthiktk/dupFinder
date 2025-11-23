@@ -62,7 +62,7 @@ def test_get_file_by_path_success(temp_db):
     assert result["filename"] == "file.txt"
     assert result["hash_value"] == "abc123hash"
     assert result["file_size"] == 1024
-    assert result["mtime"] == 1234567890.0
+    assert result["modified_time"] == 1234567890.0
     assert isinstance(result["scan_date"], float)
     assert abs(result["scan_date"] - current_epoch) < 1
 
@@ -88,8 +88,8 @@ def test_is_file_unchanged_true(temp_db):
     assert result is True
 
 
-def test_is_file_unchanged_false_newer_mtime(temp_db):
-    """Test is_file_unchanged returns False if current mtime is newer."""
+def test_is_file_unchanged_false_newer_modified_time(temp_db):
+    """Test is_file_unchanged returns False if current modified_time is newer."""
     # Insert a test entry
     current_epoch = time.time()
     upsert_file_entry(
@@ -159,7 +159,7 @@ def test_upsert_file_entry_insert(temp_db):
     
     result = get_file_by_path(path)
     assert result["file_size"] == 2048
-    assert result["mtime"] == 1234567891.0
+    assert result["modified_time"] == 1234567891.0
     assert result["hash_value"] == "def456hash"
 
 
@@ -189,7 +189,7 @@ def test_upsert_file_entry_update(temp_db):
     
     result = get_file_by_path(path)
     assert result["file_size"] == 2048
-    assert result["mtime"] == 1234567892.0
+    assert result["modified_time"] == 1234567892.0
     assert result["hash_value"] == ""  # Reset due to metadata change
     assert isinstance(result["scan_date"], float)  # Ensure epoch float
     assert abs(result["scan_date"] - current_epoch2) < 1

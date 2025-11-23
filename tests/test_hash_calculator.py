@@ -1,25 +1,25 @@
 import os
 import pytest
 from unittest.mock import patch, mock_open
-from utilities.hash_calculator import get_file_mtime, get_file_size, calculate_file_hash
+from utilities.hash_calculator import get_file_modified_time, get_file_size, calculate_file_hash
 
 
-def test_get_file_mtime_success():
-    """Test successful mtime retrieval."""
+def test_get_file_modified_time_success():
+    """Test successful modified_time retrieval."""
     test_path = "/test/path/file.txt"
-    mock_mtime = 1234567890.0
+    mock_modified_time = 1234567890.0
     
-    with patch('os.path.getmtime', return_value=mock_mtime):
-        result = get_file_mtime(test_path)
-        assert result == mock_mtime
+    with patch('os.path.getmtime', return_value=mock_modified_time):
+        result = get_file_modified_time(test_path)
+        assert result == mock_modified_time
 
 
-def test_get_file_mtime_error():
-    """Test mtime retrieval with error."""
+def test_get_file_modified_time_error():
+    """Test modified_time retrieval with error."""
     test_path = "/test/path/file.txt"
     
     with patch('os.path.getmtime', side_effect=OSError("Permission denied")):
-        result = get_file_mtime(test_path)
+        result = get_file_modified_time(test_path)
         assert result == 0.0
 
 

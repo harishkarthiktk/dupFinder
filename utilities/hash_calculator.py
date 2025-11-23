@@ -57,7 +57,7 @@ def get_file_size(file_path: str) -> int:
         return -1
 
 
-def get_file_mtime(file_path: str) -> float:
+def get_file_modified_time(file_path: str) -> float:
     """
     Get the modification time of a file as Unix timestamp.
     
@@ -70,7 +70,7 @@ def get_file_mtime(file_path: str) -> float:
     try:
         return os.path.getmtime(file_path)
     except (IOError, OSError) as e:
-        print(f"Warning: Could not get mtime for {file_path}: {e}", file=sys.stderr)
+        print(f"Warning: Could not get modified_time for {file_path}: {e}", file=sys.stderr)
         return 0.0
 
 
