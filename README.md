@@ -20,7 +20,7 @@ The purpose of the program is find duplicates; but the code is written in 2 majo
   - Text filtering for filenames and paths
   - File size range filtering
   - Human-readable file sizes
-- Incremental scanning using file modification times (modified_time) to skip re-hashing unchanged files on subsequent scans, improving performance
+- Incremental scanning using scan_date and file modification times to skip re-hashing unchanged files on subsequent scans, improving performance on repeated scans
 
 ## Installation
 
@@ -34,6 +34,10 @@ pip install -r requirements.txt # Install the required libraries.
 ```
 
 ## Usage
+
+**Note:** For consistent database entries across scans from different working directories, provide absolute paths (e.g., `/home/user/docs` or `C:\Users\user\docs`). Relative paths are automatically normalized to absolute, but existing databases with relative paths may require migration (see [Migration Notes](#migration-notes)).
+
+**Performance Tip:** On repeated scans of the same directory, the tool now efficiently skips unchanged files using the `scan_date` timestamp, avoiding redundant hashing and significantly reducing scan time for large directories.
 
 ```bash
 # Basic usage (single-threaded)
@@ -112,6 +116,18 @@ The HTML file generated could be large for browsers to handle without issues, an
 A workaround for that would be to directly query the sqlitedb created and get outputs.
 
 Simple analysis queries will be added soon as an utility, and dedicated analysis system (2) is the primary work in progress.
+
+## Migration Notes
+
+If you have an existing database with relative paths, you can migrate them to absolute paths using a simple SQL query (assuming you know the original scan's working directory, e.g., `/original/cwd`):
+
+```sql
+UPDATE file_hashes
+SET absolute_path = '/original/cwd/' || absolute_path
+WHERE absolute_path NOT LIKE '/%' AND absolute_path NOT LIKE 'C:%';
+```
+
+Run this in your SQLite database (e.g., via `sqlite3 file_hashes.db < migration.sql`). After migration, re-scan to verify consistency.
 
 ## License
 

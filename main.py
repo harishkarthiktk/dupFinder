@@ -128,13 +128,14 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
         
         with engine.connect() as connection:
             for chunk_paths in _chunk_data(paths, 900):
-                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.modified_time).where(table.c.absolute_path.in_(chunk_paths))
+                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.modified_time, table.c.scan_date).where(table.c.absolute_path.in_(chunk_paths))
                 result = connection.execute(query)
                 for row in result:
                     existing_files[row.absolute_path] = {
                         'file_size': row.file_size,
                         'hash_value': row.hash_value,
-                        'modified_time': row.modified_time
+                        'modified_time': row.modified_time,
+                        'scan_date': row.scan_date
                     }
         
         # Process each file
@@ -149,13 +150,15 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
                 hash_to_set = ''
                 if (stored and
                     stored['hash_value'] and stored['hash_value'] != '' and
-                    stored['modified_time'] is not None and
+                    stored['scan_date'] is not None and
                     last_scan_ts is not None and
+                    stored['scan_date'] >= last_scan_ts and
                     stored['file_size'] == size and
-                    stored['modified_time'] >= last_scan_ts and
-                    modified_time <= stored['modified_time']):
+                    modified_time == stored['modified_time']):
                     hash_to_set = stored['hash_value']
                     skipped_count += 1
+                else:
+                    hash_to_set = ''
                 
                 values = {
                     'filename': filename,
