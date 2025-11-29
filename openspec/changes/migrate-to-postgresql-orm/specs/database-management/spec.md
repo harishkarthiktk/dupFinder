@@ -4,7 +4,7 @@ This file defines the changes to the baseline [database-management spec](openspe
 
 ## MODIFIED Requirements
 
-### Requirement: Database Initialization
+### Requirement: SQLite Database Initialization
 The system SHALL initialize a configurable database (PostgreSQL primary, SQLite fallback) at runtime, creating necessary tables via ORM models and ensuring schema compatibility by adding missing columns if needed.
 
 #### Scenario: Configurable Database Creation
@@ -92,7 +92,7 @@ The system SHALL test database connections post-initialization and configure poo
 
 ## REMOVED Requirements
 
-### Requirement: Concurrency Optimizations (SQLite-Specific)
+### Requirement: Concurrency Optimizations
 The system SHALL NO LONGER configure SQLite-specific concurrency options like WAL mode, as PostgreSQL handles concurrency natively and ORM abstracts backend details.
 
 #### Scenario: WAL Mode Activation (Removed)

@@ -4,60 +4,86 @@
 The database management capability provides persistent storage and retrieval of file metadata, hashes, and scan information using SQLite. It ensures efficient initialization, upsert operations, batch updates, and concurrency optimizations for reliable duplicate file detection across scans.
 ## Requirements
 ### Requirement: SQLite Database Initialization
-The system SHALL initialize a SQLite database at a configurable path, creating necessary tables and ensuring backward compatibility by adding missing columns if needed.
+The system SHALL initialize a configurable database (PostgreSQL primary, SQLite fallback) at runtime, creating necessary tables via ORM models and ensuring schema compatibility by adding missing columns if needed.
 
-#### Scenario: First-Time Database Creation
-- **WHEN** the database file does not exist and initialization is called
-- **THEN** the directory is created if needed, tables 'file_hashes' and 'scan_metadata' are created with appropriate schema, and the connection is established
+#### Scenario: Configurable Database Creation
+- **WHEN** initialization is called with config.json specifying "type": "postgresql"
+- **THEN** a PostgreSQL engine is created using the provided URL (e.g., postgresql://postgres:@localhost:5432/file_hashes), tables are auto-created via Base.metadata.create_all, and connection pooling is enabled (pool_size=20, max_overflow=30)
 
-#### Scenario: Existing Database with Missing Columns
-- **WHEN** the database exists but lacks the 'modified_time' column
-- **THEN** the column is added via ALTER TABLE without data loss
+#### Scenario: SQLite Fallback Initialization
+- **WHEN** config.json specifies "type": "sqlite" with path "./outputs/file_hashes.db"
+- **THEN** a SQLite engine is created with existing parameters (no check_same_thread), tables are created if missing, and backward compatibility alterations (e.g., add modified_time) are applied
+
+#### Scenario: CLI Override
+- **WHEN** --db-url arg is provided (e.g., postgresql://user:pass@host:port/db)
+- **THEN** config.json is bypassed, and the engine uses the provided URL for initialization
 
 ### Requirement: File Metadata Storage
-The system SHALL store file metadata (filename, absolute_path, file_size, scan_date as epoch float, modified_time as epoch float) and hash_value in the 'file_hashes' table, using upsert logic to insert new files or update existing ones. scan_date SHALL be set to current Unix timestamp (time.time()) on insert/update. The absolute_path SHALL always be a full root-relative absolute path (e.g., `/home/user/docs/file.txt` on Linux or `C:\Users\user\docs\file.txt` on Windows), ensuring consistency and uniqueness regardless of the scan's current working directory.
+The system SHALL store file metadata (filename, absolute_path, file_size, scan_date as epoch float, modified_time as epoch float) and hash_value in the 'file_hashes' table using ORM models and upsert logic to insert new files or update existing ones. scan_date SHALL be set to current Unix timestamp (time.time()) on insert/update. Operations SHALL be backend-agnostic via sessions.
 
-#### Scenario: New File Insertion
-- **WHEN** a discovered file is not in the database
-- **THEN** a new row is inserted with hash_value set to empty string for pending hashing, scan_date as current epoch timestamp, and absolute_path as the normalized full absolute path
+#### Scenario: ORM Upsert for New File
+- **WHEN** a discovered file from file-discovery is not in the database
+- **THEN** a FileHash ORM instance is created (hash_value='', scan_date=time.time()), merged via session.merge, and committed in a transaction
 
-#### Scenario: Updated File Detection
-- **WHEN** an existing file has changed size or modified_time
-- **THEN** the metadata is updated (including new epoch scan_date), hash_value is reset to empty string to trigger re-hashing, and absolute_path remains the full absolute path for lookup consistency
-
-#### Scenario: Path Lookup Consistency
-- **WHEN** querying or upserting by absolute_path from different working directories
-- **THEN** the full root-relative absolute path ensures correct matching and avoids duplicates due to relative path variations
+#### Scenario: Updated File Detection with ORM
+- **WHEN** an existing file has changed size or modified_time (cross-ref: scan-optimization)
+- **THEN** the FileHash instance is queried by absolute_path, updated (new scan_date, reset hash_value), and committed; unique constraint on absolute_path prevents duplicates
 
 ### Requirement: Batch Hash Updates
-The system SHALL support batch updates for hash values of multiple files to improve performance during scanning.
+The system SHALL support batch updates for hash values of multiple files using ORM bulk operations to improve performance during scanning, compatible with both backends.
 
-#### Scenario: Batch Hash Completion
-- **WHEN** hashes for a batch of pending files are computed
-- **THEN** all hashes are updated in a single transaction using individual UPDATE statements within the batch
+#### Scenario: ORM Batch Hash Completion
+- **WHEN** hashes for a batch of pending files are computed (cross-ref: hash-calculation)
+- **THEN** FileHash instances are bulk updated via session.bulk_update_mappings or individual merges in a single transaction, optimizing for PostgreSQL concurrency
 
 ### Requirement: Pending Files Query
-The system SHALL query for files that require hashing (where hash_value is NULL or empty).
+The system SHALL query for files requiring hashing (where hash_value is NULL or empty) using ORM queries, returning (id, absolute_path) tuples efficiently with backend-specific indexes.
 
-#### Scenario: Retrieve Pending Files
-- **WHEN** processing phase begins
-- **THEN** a list of (id, absolute_path) tuples for files with empty hash_value is returned efficiently
+#### Scenario: ORM Pending Files Retrieval
+- **WHEN** processing phase begins in multiprocessing-support
+- **THEN** session.query(FileHash).filter(FileHash.hash_value.is_(None) | FileHash.hash_value == '').all() returns the list, leveraging ix_file_hashes_absolute_path index in PostgreSQL
 
 ### Requirement: Scan Timestamp Management
-The system SHALL maintain a last_scan_timestamp in the 'scan_metadata' table to track scan history and enable optimization checks.
+The system SHALL maintain a last_scan_timestamp in the 'scan_metadata' table using ORM to track scan history and enable optimization checks, backend-agnostic.
 
-#### Scenario: Update Scan Timestamp
+#### Scenario: ORM Update Scan Timestamp
 - **WHEN** a scan completes
-- **THEN** the current Unix timestamp (time.time()) is inserted or updated in the scan_metadata table
+- **THEN** ScanMetadata instance is merged with current time.time() and committed
 
-#### Scenario: Retrieve Last Scan Time
-- **WHEN** checking for unchanged files
-- **THEN** the last_scan_timestamp is retrieved to compare against file modified_times
+#### Scenario: ORM Retrieve Last Scan Time
+- **WHEN** checking for unchanged files (cross-ref: scan-optimization)
+- **THEN** session.query(ScanMetadata).first().last_scan_timestamp is returned for comparison
 
-### Requirement: Concurrency Optimizations
-The system SHALL configure the database for better concurrency, such as enabling WAL mode in multiprocessing scenarios.
+### Requirement: Configuration Loading for Database
+The system SHALL load database configuration from config.json at initialization, supporting PostgreSQL and SQLite parameters, with error handling for invalid configs.
 
-#### Scenario: WAL Mode Activation
-- **WHEN** using the multiprocessing scanner
-- **THEN** PRAGMA statements set journal_mode to WAL and synchronous to NORMAL for improved parallel access
+#### Scenario: Load PostgreSQL Config
+- **WHEN** config.json contains valid PostgreSQL settings
+- **THEN** parameters are parsed, engine created successfully; JSONDecodeError raised and logged if malformed
+
+#### Scenario: Load SQLite Config
+- **WHEN** config.json specifies SQLite path
+- **THEN** engine uses the path; fallback if PostgreSQL connection fails (OperationalError)
+
+### Requirement: ORM Model Definitions
+The system SHALL define declarative ORM models (FileHash, ScanMetadata) extending Base, with appropriate columns, indexes, and relationships for backend portability.
+
+#### Scenario: Model Schema Creation
+- **WHEN** initialize_database calls Base.metadata.create_all
+- **THEN** tables are created with columns (e.g., FileHash: id Integer PK, absolute_path String unique, etc.); indexes applied without errors
+
+#### Scenario: Multiprocessing Session Safety
+- **WHEN** multiple processes query/update (cross-ref: multiprocessing-support)
+- **THEN** per-process sessions prevent conflicts; engine.dispose() called post-task
+
+### Requirement: Connection Testing and Pooling
+The system SHALL test database connections post-initialization and configure pooling for PostgreSQL to handle concurrent loads.
+
+#### Scenario: Connection Ping
+- **WHEN** engine created
+- **THEN** engine.execute(text("SELECT 1")).scalar() succeeds; failures raise OperationalError with user-friendly message
+
+#### Scenario: PostgreSQL Pooling
+- **WHEN** high-concurrency scan (e.g., -p 8)
+- **THEN** pool manages up to 20 connections + 30 overflow, reducing wait times vs. SQLite
 
