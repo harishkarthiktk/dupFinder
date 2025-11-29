@@ -2,8 +2,9 @@
 **/venv/
 **/env/
 **/outputs
-openspec/
-openspec/*
+# openspec/
+# openspec/*
+openspec.7z
 
 
 # Byte-compiled / optimized / DLL files

@@ -1,0 +1,6 @@
+{
+  "database": {
+    "type": "sqlite",
+    "path": "./outputs/file_hashes.db"
+  }
+}

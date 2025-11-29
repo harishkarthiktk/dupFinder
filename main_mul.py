@@ -54,7 +54,7 @@ def process_file_hash(args):
 def main():
     """Main entry point for the file hash scanner."""
     parser = argparse.ArgumentParser(
-        description="Scan files in a directory, calculate hashes, store in SQLite, and generate HTML reports.",
+        description="Scan files in a directory, calculate hashes, store in database, and generate HTML reports.",
         epilog="""
 Examples:
   python main_mul.py /path/to/scan -p 4  # Use 4 processes
@@ -73,8 +73,7 @@ Note: Optimal for large scans; auto-detects CPU cores.
         help="Hashing algorithm. Possible values: %(choices)s. Default: %(default)s."
     )
     core_group.add_argument(
-        "-d", "--database", default="./outputs/file_hashes.db",
-        help="Path to the SQLite database file for storing file metadata and hashes. Default: %(default)s."
+        "--db-url", help="Database URL to override config.json. E.g., postgresql://user:pass@host:port/db or sqlite:///path/to/db.db"
     )
     core_group.add_argument(
         "-r", "--report", default="./outputs/hash_report.html",
@@ -113,28 +112,24 @@ Note: Optimal for large scans; auto-detects CPU cores.
     try:
         total_start_time = time.time()
         
-        # Initialize database with optimizations
-        print(f"Initializing database at {args.database}")
-        conn = initialize_database(args.database)
+        # Initialize database
+        print("Initializing database")
+        initialize_database(args.db_url)
         # Import engine after initialization to get the updated value
         from utilities.database import engine
-        # Enable WAL mode for better concurrency
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.commit()
 
         # --- PHASE 1: DISCOVERY ---
         print(f"\n--- Phase 1: Discovery ---")
         print(f"Scanning directory structure: {path}")
         
         discovery_start = time.time()
+        scan_date = time.time()  # Set once for all files
         files_to_upsert = []
-        
+
         if os.path.isfile(path):
             abs_path = path  # Already absolute
             file_size = get_file_size(abs_path)
             modified_time = get_file_modified_time(abs_path)
-            scan_date = time.time()
             files_to_upsert.append((os.path.basename(abs_path), abs_path, file_size, scan_date, modified_time))
         else:
             # Walk directory and collect metadata
@@ -147,7 +142,6 @@ Note: Optimal for large scans; auto-detects CPU cores.
                             print(f"Discovering {abs_file_path}")
                         file_size = os.path.getsize(abs_file_path)
                         modified_time = get_file_modified_time(abs_file_path)
-                        scan_date = time.time()
                         files_to_upsert.append((file, abs_file_path, file_size, scan_date, modified_time))
                     except OSError as e:
                         print(f"Error accessing {abs_file_path}: {e}")
@@ -175,13 +169,14 @@ Note: Optimal for large scans; auto-detects CPU cores.
         
         with engine.connect() as connection:
             for chunk_paths in _chunk_data(paths, 900):
-                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.modified_time).where(table.c.absolute_path.in_(chunk_paths))
+                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.modified_time, table.c.scan_date).where(table.c.absolute_path.in_(chunk_paths))
                 result = connection.execute(query)
                 for row in result:
                     existing_files[row.absolute_path] = {
                         'file_size': row.file_size,
                         'hash_value': row.hash_value,
-                        'modified_time': row.modified_time
+                        'modified_time': row.modified_time,
+                        'scan_date': row.scan_date
                     }
         
         # Process each file
@@ -196,11 +191,11 @@ Note: Optimal for large scans; auto-detects CPU cores.
                 hash_to_set = ''
                 if (stored and
                     stored['hash_value'] and stored['hash_value'] != '' and
-                    stored['modified_time'] is not None and
+                    stored['scan_date'] is not None and
                     last_scan_ts is not None and
                     stored['file_size'] == size and
-                    stored['modified_time'] >= last_scan_ts and
-                    modified_time <= stored['modified_time']):
+                    stored['scan_date'] >= last_scan_ts and
+                    abs(modified_time - stored['modified_time']) < 1e-6):
                     hash_to_set = stored['hash_value']
                     skipped_count += 1
                 
@@ -235,7 +230,7 @@ Note: Optimal for large scans; auto-detects CPU cores.
         print(f"\n--- Phase 2: Processing ---")
         
         # Get files that need hashing
-        pending_files = get_pending_files(conn)
+        pending_files = get_pending_files()
         
         if not pending_files:
             print("All files are already hashed. Nothing to do.")
@@ -291,12 +286,12 @@ Note: Optimal for large scans; auto-detects CPU cores.
                         
                         # If batch is full, write to DB
                         if len(current_batch) >= batch_size:
-                            update_file_hash_batch(conn, current_batch)
+                            update_file_hash_batch(None, current_batch)
                             current_batch = []
-                    
+
                     # Write remaining
                     if current_batch:
-                        update_file_hash_batch(conn, current_batch)
+                        update_file_hash_batch(None, current_batch)
             
             print(f"Processing completed in {time.time() - processing_start:.2f} seconds")
 
@@ -305,14 +300,11 @@ Note: Optimal for large scans; auto-detects CPU cores.
         
         # Generate HTML report
         print("\nGenerating HTML report...")
-        generate_html_report(args.database, args.report)
+        generate_html_report(args.report)
 
         total_time = time.time() - total_start_time
         print(f"\nTotal execution time: {total_time:.2f} seconds")
-        print(f"Database: {args.database}")
         print(f"HTML Report: {args.report}")
-
-        conn.close()
         return 0
 
     except Exception as e:
