@@ -16,6 +16,11 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from urllib.parse import urlparse
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
 
 Base = declarative_base()
 
@@ -49,6 +54,39 @@ def load_config() -> Dict[str, Any]:
         raise RuntimeError(f"Invalid config.json: {e}")
 
 
+def _create_postgres_database_if_not_exists(db_url: str, db_config: Dict[str, Any]) -> None:
+    """
+    Create PostgreSQL database if it doesn't exist.
+    Connects to 'postgres' database first to create the target database.
+    """
+    if psycopg2 is None:
+        raise RuntimeError("psycopg2 is required for PostgreSQL database creation. Install with: pip install psycopg2-binary")
+
+    parsed = urlparse(db_url)
+    db_name = parsed.path.lstrip('/')
+
+    # Connect to 'postgres' database to create the target database
+    postgres_url = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/postgres"
+
+    try:
+        conn = psycopg2.connect(postgres_url)
+        conn.autocommit = True
+        cursor = conn.cursor()
+
+        # Check if database exists
+        cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,))
+        exists = cursor.fetchone()
+
+        if not exists:
+            cursor.execute(f"CREATE DATABASE {db_name}")
+            print(f"Created PostgreSQL database: {db_name}")
+
+        cursor.close()
+        conn.close()
+    except psycopg2.Error as e:
+        raise RuntimeError(f"Failed to create PostgreSQL database '{db_name}': {e}")
+
+
 def test_connection() -> bool:
     """Test database connection."""
     try:
@@ -72,6 +110,15 @@ def initialize_database(db_url: str = None) -> None:
     if db_url:
         # Override with provided URL
         if 'postgresql' in db_url:
+            parsed = urlparse(db_url)
+            db_config = {
+                'user': parsed.username,
+                'password': parsed.password,
+                'host': parsed.hostname,
+                'port': parsed.port or 5432,
+                'database': parsed.path.lstrip('/')
+            }
+            _create_postgres_database_if_not_exists(db_url, db_config)
             engine = create_engine(db_url, pool_size=20, max_overflow=30)
         else:
             engine = create_engine(db_url, connect_args={'check_same_thread': False} if 'sqlite' in db_url else {})
@@ -80,6 +127,7 @@ def initialize_database(db_url: str = None) -> None:
         db_config = config['database']
         if db_config['type'] == 'postgresql':
             url = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            _create_postgres_database_if_not_exists(url, db_config)
             engine = create_engine(url, pool_size=20, max_overflow=30)
         elif db_config['type'] == 'sqlite':
             url = f"sqlite:///{db_config['path']}"
