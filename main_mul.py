@@ -6,7 +6,6 @@ This script provides a command line interface for scanning files,
 calculating their hashes in parallel, storing them in SQLite, and generating HTML reports.
 """
 
-import argparse
 import os
 import sys
 import time
@@ -15,6 +14,7 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 
 # Custom Module Imports
+from utilities.arguments import parse_arguments
 from utilities.hash_calculator import get_file_size, get_file_modified_time
 from utilities.database import initialize_database, get_pending_files, update_file_hash_batch, get_last_scan_timestamp, update_last_scan_timestamp, _chunk_data
 from utilities.html_generator import generate_html_report
@@ -53,52 +53,7 @@ def process_file_hash(args):
 
 def main():
     """Main entry point for the file hash scanner."""
-    parser = argparse.ArgumentParser(
-        description="Scan files in a directory, calculate hashes, store in database, and generate HTML reports.",
-        epilog="""
-Examples:
-  python main_mul.py /path/to/scan -p 4  # Use 4 processes
-  python main_mul.py /path/to/scan -a sha1 -c 8MB -b 2000 -v  # Custom perf + core with verbose
-  python main_mul.py /path/to/scan -p 8 -c 8388608 -b 500  # Explicit 8MB chunk, small batches
-Note: Optimal for large scans; auto-detects CPU cores.
-""",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument('--version', action='version', version='%(prog)s 1.0 (dupFinder File Hash Scanner)')
-
-    core_group = parser.add_argument_group('Core Options')
-    core_group.add_argument("path", help="Path to the directory to scan recursively or a single file. Required.")
-    core_group.add_argument(
-        "-a", "--algorithm", choices=['md5', 'sha1', 'sha256', 'sha512'], default="md5",
-        help="Hashing algorithm. Possible values: %(choices)s. Default: %(default)s."
-    )
-    core_group.add_argument(
-        "--db-url", help="Database URL to override config.json. E.g., postgresql://user:pass@host:port/db or sqlite:///path/to/db.db"
-    )
-    core_group.add_argument(
-        "-r", "--report", default="./outputs/hash_report.html",
-        help="Path for the generated interactive HTML report. Default: %(default)s."
-    )
-    core_group.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Enable verbose output for detailed processing information and debug logging."
-    )
-
-    perf_group = parser.add_argument_group('Performance Options')
-    perf_group.add_argument(
-        "-p", "--processes", type=int, default=multiprocessing.cpu_count(),
-        help="Number of parallel processes for hash calculation. Use 0 for auto (CPU cores). Default: %(default)s."
-    )
-    perf_group.add_argument(
-        "-c", "--chunk-size", type=int, default=4*1024*1024,
-        help="Buffer size for reading files during hashing (bytes). Larger values improve I/O for big files but increase memory use. Default: %(default)s (4MB). Examples: 1MB=1048576, 8MB=8388608."
-    )
-    perf_group.add_argument(
-        "-b", "--batch-size", type=int, default=1000,
-        help="Number of hashes to process and commit to database in batches. Higher values reduce DB overhead but increase memory. Default: %(default)s."
-    )
-
-    args = parser.parse_args()
+    args = parse_arguments(include_performance_options=True)
     path = args.path
 
     # Normalize path to absolute
@@ -191,11 +146,9 @@ Note: Optimal for large scans; auto-detects CPU cores.
                 hash_to_set = ''
                 if (stored and
                     stored['hash_value'] and stored['hash_value'] != '' and
-                    stored['scan_date'] is not None and
-                    last_scan_ts is not None and
                     stored['file_size'] == size and
-                    stored['scan_date'] >= last_scan_ts and
-                    abs(modified_time - stored['modified_time']) < 1e-6):
+                    last_scan_ts is not None and
+                    (abs(modified_time - stored['modified_time']) < 1e-6 or modified_time < last_scan_ts)):
                     hash_to_set = stored['hash_value']
                     skipped_count += 1
                 
@@ -298,13 +251,16 @@ Note: Optimal for large scans; auto-detects CPU cores.
         # Update last scan timestamp
         update_last_scan_timestamp(time.time())
         
-        # Generate HTML report
-        print("\nGenerating HTML report...")
-        generate_html_report(args.report)
+        # Generate HTML report (unless skipped)
+        if not args.skip_html:
+            print("\nGenerating HTML report...")
+            generate_html_report(args.report)
+            print(f"HTML Report: {args.report}")
+        else:
+            print("\nHTML report generation skipped (--skip-html flag set).")
 
         total_time = time.time() - total_start_time
         print(f"\nTotal execution time: {total_time:.2f} seconds")
-        print(f"HTML Report: {args.report}")
         return 0
 
     except Exception as e:

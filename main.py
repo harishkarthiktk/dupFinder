@@ -6,13 +6,13 @@ This script provides a command line interface for scanning files,
 calculating their hashes, storing them in SQLite, and generating HTML reports.
 """
 
-import argparse
 import os
 import sys
 import time
 from tqdm import tqdm
 
 # Custom Module Imports
+from utilities.arguments import parse_arguments
 from utilities.hash_calculator import calculate_file_hash, get_file_size, get_file_modified_time
 from utilities.database import initialize_database, get_pending_files, update_file_hash, update_file_hash_batch, get_last_scan_timestamp, update_last_scan_timestamp, _chunk_data
 from utilities.html_generator import generate_html_report
@@ -25,37 +25,7 @@ BATCH_SIZE = 1000  # Number of files to process before database commit
 
 def main():
     """Main entry point for the file hash scanner."""
-    parser = argparse.ArgumentParser(
-        description="Scan files in a directory, calculate hashes, store in database, and generate HTML reports.",
-        epilog="""
-Examples:
-  python main.py /path/to/scan  # Default settings
-  python main.py /path/to/scan -a md5 -d custom.db -r report.html -v  # Custom options with verbose output
-Note: For large directories, consider using main_mul.py for multiprocessing.
-""",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument('--version', action='version', version='%(prog)s 1.0 (dupFinder File Hash Scanner)')
-
-    core_group = parser.add_argument_group('Core Options')
-    core_group.add_argument("path", help="Path to the directory to scan recursively or a single file. Required.")
-    core_group.add_argument(
-        "-a", "--algorithm", choices=['md5', 'sha1', 'sha256', 'sha512'], default="md5",
-        help="Hashing algorithm. Possible values: %(choices)s. Default: %(default)s."
-    )
-    core_group.add_argument(
-        "--db-url", help="Database URL to override config.json. E.g., postgresql://user:pass@host:port/db or sqlite:///path/to/db.db"
-    )
-    core_group.add_argument(
-        "-r", "--report", default="./outputs/hash_report.html",
-        help="Path for the generated interactive HTML report. Default: %(default)s."
-    )
-    core_group.add_argument(
-        "-v", "--verbose", action='store_true',
-        help="Enable verbose output for detailed processing information and debug logging."
-    )
-
-    args = parser.parse_args()
+    args = parse_arguments(include_performance_options=False)
     path = args.path
 
     # Normalize path to absolute
@@ -148,11 +118,9 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
                 hash_to_set = ''
                 if (stored and
                     stored['hash_value'] and stored['hash_value'] != '' and
-                    stored['scan_date'] is not None and
-                    last_scan_ts is not None and
-                    stored['scan_date'] >= last_scan_ts and
                     stored['file_size'] == size and
-                    abs(modified_time - stored['modified_time']) < 1e-6):
+                    last_scan_ts is not None and
+                    (abs(modified_time - stored['modified_time']) < 1e-6 or modified_time < last_scan_ts)):
                     hash_to_set = stored['hash_value']
                     skipped_count += 1
                 else:
@@ -230,13 +198,16 @@ Note: For large directories, consider using main_mul.py for multiprocessing.
         # Update last scan timestamp
         update_last_scan_timestamp(time.time())
 
-        # Generate HTML report
-        print("\nGenerating HTML report...")
-        generate_html_report(args.report)
+        # Generate HTML report (unless skipped)
+        if not args.skip_html:
+            print("\nGenerating HTML report...")
+            generate_html_report(args.report)
+            print(f"HTML Report: {args.report}")
+        else:
+            print("\nHTML report generation skipped (--skip-html flag set).")
 
         total_time = time.time() - total_start_time
         print(f"\nTotal execution time: {total_time:.2f} seconds")
-        print(f"HTML Report: {args.report}")
         return 0
 
     except Exception as e:
