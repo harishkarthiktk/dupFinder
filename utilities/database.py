@@ -30,11 +30,15 @@ class FileHash(Base):
     id = Column(Integer, primary_key=True)
     filename = Column(String, nullable=False)
     absolute_path = Column(String, nullable=False, unique=True)
+    tier1_hash = Column(String, nullable=False, default='')  # Ensure default empty string
     hash_value = Column(String, nullable=True)
     file_size = Column(BigInteger, nullable=False)
     scan_date = Column(Float, nullable=False)
     modified_time = Column(Float, nullable=True)
-    __table_args__ = (Index('ix_file_hashes_absolute_path', 'absolute_path'),)
+    __table_args__ = (
+        Index('ix_file_hashes_absolute_path', 'absolute_path'),
+        Index('idx_tier1_hash', 'tier1_hash'),
+    )
 
 
 class ScanMetadata(Base):
@@ -137,6 +141,8 @@ def initialize_database(db_url: str = None) -> None:
 
     # Create tables using ORM
     Base.metadata.create_all(engine)
+
+    # Migration removed. Column is now part of the ORM model definition
 
     # Create SessionFactory
     SessionFactory = scoped_session(sessionmaker(bind=engine))
@@ -300,40 +306,48 @@ def get_session():
 def upsert_files(conn: sqlite3.Connection, file_data: List[Tuple]) -> None:
     """
     Insert new files or update existing ones.
-    If a file exists but size changed, reset hash to NULL.
+    If a file exists but size changed, reset hashes to NULL/empty.
 
     All paths in file_data must use full root-relative absolute paths.
 
     Args:
         conn: Ignored
-        file_data: List of tuples (filename, absolute_path, file_size, scan_date)
+        file_data: List of tuples (filename, absolute_path, tier1_hash, hash_value, file_size, scan_date, modified_time)
     """
     with get_session() as session:
-        for filename, abs_path, file_size, scan_date in file_data:
+        for filename, abs_path, tier1_hash, hash_value, file_size, scan_date, modified_time in file_data:
             # Check if exists
             existing = session.query(FileHash).filter_by(absolute_path=abs_path).first()
             if existing:
-                if existing.file_size != file_size:
-                    # Changed, reset hash
-                    existing.filename = filename
-                    existing.file_size = file_size
-                    existing.scan_date = scan_date
+                if existing.file_size != file_size or existing.modified_time != modified_time:
+                    # Changed, reset hashes
                     existing.hash_value = ''
-                    existing.modified_time = None
+                    existing.tier1_hash = tier1_hash  # Update tier1 if changed
+                else:
+                    # Unchanged, keep existing hashes if valid
+                    if not existing.tier1_hash:
+                        existing.tier1_hash = tier1_hash
+                    if hash_value and not existing.hash_value:
+                        existing.hash_value = hash_value
+                existing.filename = filename
+                existing.file_size = file_size
+                existing.scan_date = scan_date
+                existing.modified_time = modified_time
             else:
                 # New
                 new_file = FileHash(
                     filename=filename,
                     absolute_path=abs_path,
+                    tier1_hash=tier1_hash,
+                    hash_value=hash_value or '',
                     file_size=file_size,
                     scan_date=scan_date,
-                    hash_value='',
-                    modified_time=None
+                    modified_time=modified_time
                 )
                 session.add(new_file)
 
 def get_pending_files(conn: sqlite3.Connection = None) -> List[Tuple]:
-    """Get all files that have no hash."""
+    """Get all files that have no full hash (tier1 may be present)."""
     with get_session() as session:
         files = session.query(FileHash).filter((FileHash.hash_value == '') | (FileHash.hash_value == None)).all()
         return [(f.id, f.absolute_path) for f in files]
@@ -420,33 +434,42 @@ def is_file_unchanged(absolute_path: str, current_modified_time: float) -> bool:
     return (file_info['modified_time'] >= last_scan_ts and current_modified_time <= file_info['modified_time'])
 
 
-def upsert_file_entry(absolute_path: str, filename: str, file_size: int, modified_time: float,
-                      hash_value: str = None, scan_date: float = None) -> None:
+# Migration function removed. Column is now part of the ORM model definition
+
+
+def upsert_file_entry(absolute_path: str, filename: str, tier1_hash: str, hash_value: str = None,
+                      file_size: int = None, modified_time: float = None, scan_date: float = None) -> None:
     """
-    Upsert a file entry with metadata.
+    Upsert a file entry with metadata including tier1_hash.
     """
     with get_session() as session:
         current_scan_date = scan_date if scan_date is not None else time.time()
 
         existing = session.query(FileHash).filter_by(absolute_path=absolute_path).first()
         if existing:
-            if existing.file_size != file_size or existing.modified_time != modified_time:
+            if file_size is not None and existing.file_size != file_size:
                 existing.hash_value = ''
-            elif hash_value is not None:
+            if tier1_hash:
+                existing.tier1_hash = tier1_hash
+            if hash_value is not None:
                 existing.hash_value = hash_value
-            existing.filename = filename
-            existing.file_size = file_size
+            if filename:
+                existing.filename = filename
+            if file_size is not None:
+                existing.file_size = file_size
             existing.scan_date = current_scan_date
-            existing.modified_time = modified_time
+            if modified_time is not None:
+                existing.modified_time = modified_time
         else:
             new_hash = hash_value if hash_value is not None else ''
             new_file = FileHash(
                 filename=filename,
                 absolute_path=absolute_path,
+                tier1_hash=tier1_hash,
+                hash_value=new_hash,
                 file_size=file_size,
                 scan_date=current_scan_date,
-                modified_time=modified_time,
-                hash_value=new_hash
+                modified_time=modified_time
             )
             session.add(new_file)
 

@@ -12,43 +12,49 @@ import time
 from tqdm import tqdm
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from typing import List, Dict, Tuple
+from collections import defaultdict
 
 # Custom Module Imports
 from utilities.arguments import parse_arguments
-from utilities.hash_calculator import get_file_size, get_file_modified_time
-from utilities.database import initialize_database, get_pending_files, update_file_hash_batch, get_last_scan_timestamp, update_last_scan_timestamp, _chunk_data
+from utilities.hash_calculator import calculate_file_hash_tiered, group_files_by_size, get_file_size, get_file_modified_time
+from utilities.database import initialize_database, upsert_files, get_last_scan_timestamp, update_last_scan_timestamp, _chunk_data, FileHash, get_session
 from utilities.html_generator import generate_html_report
 
 from sqlalchemy import Column, Integer, String, BigInteger, Float, Table, MetaData, select, insert
+from concurrent.futures import as_completed
 
 
-def optimized_file_hash(file_path, algorithm, chunk_size=1024*1024):
-    """An optimized version of calculate_file_hash with larger buffer size"""
+def compute_tier1_worker(args):
+    """Compute tier1 hash for a file"""
+    path, algorithm = args
     try:
-        from hashlib import new
-        hash_obj = new(algorithm)
-        
-        with open(file_path, 'rb') as f:
-            while chunk := f.read(chunk_size):
-                hash_obj.update(chunk)
-                
-        return hash_obj.hexdigest()
+        tier1, _ = calculate_file_hash_tiered(path, algorithm, compute_full=False)
+        return path, tier1
     except Exception as e:
-        print(f"Error calculating hash for {file_path}: {e}")
-        return None
+        print(f"Error computing tier1 for {path}: {e}")
+        return path, None
 
 
-def process_file_hash(args):
-    """Process a single file hash calculation"""
-    file_id, file_path, algorithm, chunk_size = args
+def compute_full_worker(args):
+    """Compute full hash for a file"""
+    path, algorithm = args
     try:
-        hash_value = optimized_file_hash(file_path, algorithm, chunk_size)
-        if hash_value:
-            return (file_id, hash_value)
-        return None
+        _, full = calculate_file_hash_tiered(path, algorithm)
+        return path, full
     except Exception as e:
-        print(f"Error processing {file_path}: {e}")
-        return None
+        print(f"Error computing full for {path}: {e}")
+        return path, None
+
+
+def group_pending_by_size(pending_paths: List[str]) -> Dict[int, List[str]]:
+    """Group pending paths by file size, only return groups with 2+ files."""
+    size_to_paths = defaultdict(list)
+    for path in pending_paths:
+        size = get_file_size(path)
+        if size > 0:
+            size_to_paths[size].append(path)
+    return {size: paths for size, paths in size_to_paths.items() if len(paths) >= 2}
 
 
 def main():
@@ -116,6 +122,7 @@ def main():
                      Column('id', Integer, primary_key=True),
                      Column('filename', String, nullable=False),
                      Column('absolute_path', String, nullable=False, unique=True),
+                     Column('tier1_hash', String, nullable=False),
                      Column('hash_value', String, nullable=True),
                      Column('file_size', BigInteger, nullable=False),
                      Column('scan_date', Float, nullable=False),
@@ -124,127 +131,136 @@ def main():
         
         with engine.connect() as connection:
             for chunk_paths in _chunk_data(paths, 900):
-                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.modified_time, table.c.scan_date).where(table.c.absolute_path.in_(chunk_paths))
+                query = select(table.c.absolute_path, table.c.file_size, table.c.hash_value, table.c.tier1_hash, table.c.modified_time, table.c.scan_date).where(table.c.absolute_path.in_(chunk_paths))
                 result = connection.execute(query)
                 for row in result:
                     existing_files[row.absolute_path] = {
                         'file_size': row.file_size,
                         'hash_value': row.hash_value,
+                        'tier1_hash': row.tier1_hash,
                         'modified_time': row.modified_time,
                         'scan_date': row.scan_date
                     }
         
-        # Process each file
-        inserts = []
-        updates = []
-        skipped_count = 0
+        # Separate unchanged and pending
+        unchanged_updates = []
+        pending_list = []
+        unchanged_count = 0
         
         with tqdm(total=len(files_to_upsert), desc="Processing metadata") as pbar:
             for item in files_to_upsert:
                 filename, abs_path, size, scan_date, modified_time = item
                 stored = existing_files.get(abs_path)
-                hash_to_set = ''
-                if (stored and
+                is_unchanged = (stored and
                     stored['hash_value'] and stored['hash_value'] != '' and
+                    stored['tier1_hash'] and stored['tier1_hash'] != '' and
                     stored['file_size'] == size and
                     last_scan_ts is not None and
-                    (abs(modified_time - stored['modified_time']) < 1e-6 or modified_time < last_scan_ts)):
-                    hash_to_set = stored['hash_value']
-                    skipped_count += 1
-                
-                values = {
-                    'filename': filename,
-                    'absolute_path': abs_path,
-                    'file_size': size,
-                    'scan_date': scan_date,
-                    'modified_time': modified_time,
-                    'hash_value': hash_to_set
-                }
-                
-                if stored:
-                    updates.append(values)
+                    (abs(modified_time - stored['modified_time']) < 1e-6 or modified_time < last_scan_ts))
+                if is_unchanged:
+                    values = {
+                        'filename': filename,
+                        'absolute_path': abs_path,
+                        'tier1_hash': stored['tier1_hash'],
+                        'hash_value': stored['hash_value'],
+                        'file_size': size,
+                        'scan_date': scan_date,
+                        'modified_time': modified_time
+                    }
+                    unchanged_updates.append(values)
+                    unchanged_count += 1
                 else:
-                    inserts.append(values)
-                
+                    pending_list.append((filename, abs_path, size, scan_date, modified_time))
                 pbar.update(1)
         
-        # Batch insert and update
-        with engine.begin() as connection:
-            if inserts:
-                connection.execute(insert(table), inserts)
-            for update_item in updates:
-                stmt = table.update().where(table.c.absolute_path == update_item['absolute_path']).values(**update_item)
-                connection.execute(stmt)
+        # Batch update unchanged files
+        if unchanged_updates:
+            with engine.begin() as connection:
+                for update_item in unchanged_updates:
+                    stmt = table.update().where(table.c.absolute_path == update_item['absolute_path']).values(**update_item)
+                    connection.execute(stmt)
         
-        print(f"Processed metadata. Skipped hashing {skipped_count} unchanged files.")
+        print(f"Processed metadata. Skipped {unchanged_count} unchanged files.")
         print(f"Discovery completed in {time.time() - discovery_start:.2f} seconds")
 
-        # --- PHASE 2: PROCESSING ---
-        print(f"\n--- Phase 2: Processing ---")
+        # --- PHASE 2: TWO-TIER PROCESSING FOR PENDING ---
+        print(f"\n--- Phase 2: Two-Tier Processing ---")
         
-        # Get files that need hashing
-        pending_files = get_pending_files()
-        
-        if not pending_files:
-            print("All files are already hashed. Nothing to do.")
+        if not pending_list:
+            print("No pending files to process.")
         else:
-            print(f"Found {len(pending_files)} files pending hash calculation.")
-            
-            # Sort by size (Largest first) to avoid tail latency
-            # We need to fetch sizes first? get_pending_files only returns ID and Path.
-            # Ideally we should fetch size in get_pending_files too.
-            # For now, let's just process them. The OS cache might help.
-            # Optimization: We could modify get_pending_files to return size and sort in SQL.
-            # But let's stick to the plan.
-            
-            print(f"Calculating {args.algorithm.upper()} hashes using {args.processes} processes...")
+            print(f"Processing {len(pending_list)} pending files with two-tier optimization.")
             processing_start = time.time()
             
-            # Prepare arguments
-            # (file_id, file_path, algorithm, chunk_size)
-            process_args = [
-                (pid, ppath, args.algorithm, args.chunk_size) 
-                for pid, ppath in pending_files
-            ]
+            pending_paths = [item[1] for item in pending_list]
             
-            # Process in batches to update DB incrementally
-            total_files = len(process_args)
-            batch_size = args.batch_size
+            # Pre-process: Group pending by size to identify potential duplicates
+            size_groups = group_pending_by_size(pending_paths)
             
+            # Compute tier1 for all pending in parallel
+            tier1_args = [(path, args.algorithm) for path in pending_paths]
+            print("Computing tier1 hashes in parallel...")
             with ProcessPoolExecutor(max_workers=args.processes) as executor:
-                with tqdm(total=total_files, desc="Hashing files") as pbar:
-                    # We process all files, but we collect results in chunks to write to DB
-                    # Using executor.map is easiest, but we want to batch DB writes.
-                    # Let's use a generator approach or just collect chunks.
-                    
-                    # Chunk the input arguments for better memory management if list is huge
-                    # But we already have the list in memory.
-                    
-                    # Submit all tasks
-                    # To avoid submitting millions of tasks at once, we can chunk the submission too.
-                    # But ProcessPoolExecutor handles this reasonably well.
-                    
-                    # Better approach: Use imap_unordered or map and iterate
-                    results_iterator = executor.map(process_file_hash, process_args, chunksize=10)
-                    
-                    current_batch = []
-                    for result in results_iterator:
-                        if result:
-                            current_batch.append(result)
-                        
+                tier1_futures = [executor.submit(compute_tier1_worker, arg) for arg in tier1_args]
+                with tqdm(total=len(tier1_args), desc="Computing tier1 hashes") as pbar:
+                    tier1_results = []
+                    for future in as_completed(tier1_futures):
+                        tier1_results.append(future.result())
                         pbar.update(1)
-                        
-                        if args.verbose and len(current_batch) % 100 == 0:
-                            print(f"Processed batch of {len(current_batch)} hashes so far...")
-                        
-                        # If batch is full, write to DB
-                        if len(current_batch) >= batch_size:
-                            update_file_hash_batch(None, current_batch)
-                            current_batch = []
-
-                    # Write remaining
-                    if current_batch:
-                        update_file_hash_batch(None, current_batch)
+            
+            path_tier1 = {path: tier1 for path, tier1 in tier1_results if tier1}
+            
+            # Group by size and tier1 for candidates
+            size_tier1_to_paths = defaultdict(list)
+            path_size = {item[1]: item[2] for item in pending_list}
+            for path in pending_paths:
+                size = path_size[path]
+                tier1 = path_tier1.get(path, '')
+                if tier1:
+                    size_tier1_to_paths[(size, tier1)].append(path)
+            
+            candidate_paths = []
+            for key, paths in size_tier1_to_paths.items():
+                if len(paths) > 1:
+                    candidate_paths.extend(paths)
+                else:
+                    # Check if tier1 matches existing
+                    path = paths[0]
+                    tier1 = path_tier1[path]
+                    with get_session() as session:
+                        count = session.query(FileHash).filter(
+                            FileHash.file_size == key[0],
+                            FileHash.tier1_hash == tier1,
+                            FileHash.hash_value.isnot(None)
+                        ).count()
+                    if count > 0:
+                        candidate_paths.append(path)
+            
+            # Compute full for candidates
+            path_full = {}
+            if candidate_paths:
+                unique_candidates = list(set(candidate_paths))
+                full_args = [(path, args.algorithm) for path in unique_candidates]
+                print(f"Computing full hashes for {len(unique_candidates)} candidates...")
+                with ProcessPoolExecutor(max_workers=args.processes) as executor:
+                    full_futures = [executor.submit(compute_full_worker, arg) for arg in full_args]
+                    with tqdm(total=len(full_args), desc="Computing full hashes") as pbar:
+                        full_results = []
+                        for future in as_completed(full_futures):
+                            full_results.append(future.result())
+                            pbar.update(1)
+                path_full = {path: full for path, full in full_results if full}
+            
+            # Prepare data for upsert
+            file_hashes = []
+            for item in pending_list:
+                filename, abs_path, size, scan_date, modified_time = item
+                tier1 = path_tier1.get(abs_path, '')
+                full = path_full.get(abs_path, None)
+                file_hashes.append((filename, abs_path, tier1, full, size, scan_date, modified_time))
+            
+            # Upsert all
+            upsert_files(None, file_hashes)
             
             print(f"Processing completed in {time.time() - processing_start:.2f} seconds")
 
