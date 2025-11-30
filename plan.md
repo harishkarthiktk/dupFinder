@@ -1,4 +1,4 @@
-# File Skipping Logic Fix - Implementation Plan
+# File Skipping Logic Fix - Implementation Plan with Tier1 Hashing
 
 ## Problem Statement
 
