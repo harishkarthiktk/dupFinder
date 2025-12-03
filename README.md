@@ -26,6 +26,7 @@ The purpose of the program is find duplicates; but the code is written in 2 majo
 ## Installation
 
 Requires Python 3.6+ and either PostgreSQL (recommended) or SQLite.
+NOTE: Python 3.12+ might not have precompiled binnaries for all required dependencies, beware. Tested in Python 3.10.
 
 ### PostgreSQL Setup (Recommended)
 1. Install PostgreSQL server (e.g., `sudo apt install postgresql` on Ubuntu, or download from postgresql.org)

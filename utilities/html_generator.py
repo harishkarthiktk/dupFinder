@@ -8,6 +8,7 @@ from jinja2 import Template
 # Custom module Imports
 from utilities.utils import format_file_size, get_size_category
 from utilities.database import get_all_records
+import os
 
 # HTML Template
 HTML_TEMPLATE = '''<!DOCTYPE html>
@@ -192,6 +193,11 @@ def generate_html_report(output_path: str) -> None:
         scan_date=scan_date_display,
         table_data_json=table_data_json
     )
+
+    # Ensure output directory exists
+    dir_path = os.path.dirname(output_path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
